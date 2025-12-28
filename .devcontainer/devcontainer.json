@@ -1,0 +1,78 @@
+{
+  "name": "py2rust Development",
+  "dockerFile": "Dockerfile",
+  "context": "..",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.vscode-json",
+        "ms-vscode.vscode-yaml",
+        "rust-lang.rust-analyzer",
+        "ms-vscode.vscode-typescript-next",
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.isort",
+        "GitHub.copilot",
+        "GitHub.copilot-chat",
+        "ms-vscode-remote.remote-containers",
+        "ms-vscode.vscode-docker",
+        "redhat.vscode-yaml",
+        "ms-vscode.makefile-tools",
+        "ms-vscode.vscode-markdown",
+        "ms-vscode.hexeditor",
+        "ms-vscode.vscode-json",
+        "ms-vscode.vscode-yaml",
+        "ms-vscode.vscode-typescript-next",
+        "ms-python.python",
+        "ms-python.black-formatter",
+        "ms-python.isort",
+        "GitHub.copilot",
+        "GitHub.copilot-chat",
+        "ms-vscode-remote.remote-containers",
+        "ms-vscode.vscode-docker",
+        "redhat.vscode-yaml",
+        "ms-vscode.makefile-tools",
+        "ms-vscode.vscode-markdown",
+        "ms-vscode.hexeditor"
+      ],
+      "settings": {
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.formatting.provider": "black",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": true,
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll": "explicit"
+        },
+        "git.autofetch": true,
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "python.envFile": "${workspaceFolder}/.env"
+      }
+    }
+  },
+  "forwardPorts": [3000, 8000, 8080],
+  "postCreateCommand": "ollama serve & sleep 5 && cargo check && pip install -e . && python agents/langchain_agents.py",
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=${localWorkspaceFolder}/.git,target=/workspaces/bootdisk/.git,type=bind,consistency=cached"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "latest"
+    }
+  }
+}

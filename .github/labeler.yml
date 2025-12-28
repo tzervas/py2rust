@@ -1,0 +1,21 @@
+version: v1
+
+labels:
+  - label: "enhancement"
+    files:
+      - "src/**"
+  - label: "documentation"
+    files:
+      - "*.md"
+      - "docs/**"
+  - label: "dependencies"
+    files:
+      - "pyproject.toml"
+      - "uv.lock"
+  - label: "ci"
+    files:
+      - ".github/**"
+  - label: "testing"
+    files:
+      - "tests/**"
+      - "*test*.py"
