@@ -1,9 +1,10 @@
 """Command-line interface for py2rust transpiler."""
 
 import ast
-import click
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
+import click
 
 
 @click.group()
@@ -20,7 +21,7 @@ def main():
 def transpile(python_file, output, module):
     """Transpile Python code to Rust."""
     python_path = Path(python_file)
-    output_path = Path(output) if output else python_path.with_suffix('.rs')
+    output_path = Path(output) if output else python_path.with_suffix(".rs")
     module_name = module or python_path.stem
 
     click.echo(f"🔄 Transpiling {python_path} to Rust")
@@ -28,7 +29,7 @@ def transpile(python_file, output, module):
     click.echo(f"📦 Module: {module_name}")
 
     # Read and parse Python code
-    with open(python_path, 'r') as f:
+    with open(python_path, "r") as f:
         python_code = f.read()
 
     try:
@@ -37,7 +38,7 @@ def transpile(python_file, output, module):
         rust_code = transpiler.transpile(tree)
 
         # Write Rust code
-        with open(output_path, 'w') as f:
+        with open(output_path, "w") as f:
             f.write(rust_code)
 
         click.echo("✅ Transpilation completed successfully")
@@ -58,7 +59,7 @@ def analyze(python_file):
 
     click.echo(f"🔍 Analyzing {python_path} for Rust compatibility")
 
-    with open(python_path, 'r') as f:
+    with open(python_path, "r") as f:
         python_code = f.read()
 
     try:
@@ -135,11 +136,17 @@ class CompatibilityAnalyzer:
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                issues.append(f"Import statement '{node.names[0].name}' needs manual conversion")
+                issues.append(
+                    f"Import statement '{node.names[0].name}' needs manual conversion"
+                )
             elif isinstance(node, ast.ClassDef):
-                issues.append(f"Class '{node.name}' needs manual conversion to Rust struct/impl")
+                issues.append(
+                    f"Class '{node.name}' needs manual conversion to Rust struct/impl"
+                )
             elif isinstance(node, ast.Try):
-                issues.append("Try/except blocks need manual conversion to Rust error handling")
+                issues.append(
+                    "Try/except blocks need manual conversion to Rust error handling"
+                )
             elif isinstance(node, ast.Lambda):
                 issues.append("Lambda functions need manual conversion")
 
