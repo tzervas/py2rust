@@ -1,0 +1,61 @@
+{
+  "folders": [
+    {
+      "name": "py2rust",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "python.defaultInterpreterPath": "./.venv/bin/python",
+    "python.formatting.provider": "black",
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true,
+    "python.linting.mypyEnabled": true,
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit"
+    },
+    "git.autofetch": true,
+    "terminal.integrated.shell.linux": "/bin/bash"
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.black-formatter",
+      "ms-python.isort",
+      "ms-python.pylint",
+      "ms-python.mypy-type-checker",
+      "ms-vscode.vscode-json",
+      "ms-vscode.vscode-yaml",
+      "GitHub.copilot",
+      "GitHub.copilot-chat",
+      "ms-vscode-remote.remote-containers",
+      "ms-vscode.vscode-docker",
+      "redhat.vscode-yaml",
+      "ms-vscode.vscode-markdown",
+      "hbenl.vscode-test-explorer"
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Python: Current File",
+        "type": "python",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      },
+      {
+        "name": "Python: Debug Tests",
+        "type": "python",
+        "request": "launch",
+        "module": "pytest",
+        "args": ["-v"],
+        "console": "integratedTerminal",
+        "justMyCode": true
+      }
+    ]
+  }
+}
