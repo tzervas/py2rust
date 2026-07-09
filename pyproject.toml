@@ -23,9 +23,21 @@ py2rust = "py2rust.cli:main"
 [tool.uv]
 dev-dependencies = [
     "pytest>=7.0.0",
+    "ruff>=0.9.0",
     "black>=23.0.0",
     "isort>=5.12.0",
     "mypy>=1.0.0",
     "types-PyYAML>=6.0.0",
     "pre-commit>=3.0.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
