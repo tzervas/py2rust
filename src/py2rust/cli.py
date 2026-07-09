@@ -2,7 +2,6 @@
 
 import ast
 from pathlib import Path
-from typing import List
 
 import click
 
@@ -99,7 +98,7 @@ class PythonToRustTranspiler:
 
         return "\n".join(lines)
 
-    def _generate_module_structure(self, tree: ast.AST) -> List[str]:
+    def _generate_module_structure(self, tree: ast.AST) -> list[str]:
         """Generate basic Rust module structure."""
         lines = []
 
@@ -110,7 +109,7 @@ class PythonToRustTranspiler:
 
         return lines
 
-    def _transpile_function(self, func: ast.FunctionDef) -> List[str]:
+    def _transpile_function(self, func: ast.FunctionDef) -> list[str]:
         """Transpile a Python function to Rust."""
         lines = []
 
@@ -130,7 +129,7 @@ class PythonToRustTranspiler:
 class CompatibilityAnalyzer:
     """Analyzer for Python to Rust conversion compatibility."""
 
-    def analyze(self, tree: ast.AST) -> List[str]:
+    def analyze(self, tree: ast.AST) -> list[str]:
         """Analyze Python AST for Rust compatibility issues."""
         issues = []
 
