@@ -64,6 +64,16 @@
       "summary": "- README.md"
     },
     {
+      "anchor": "agents--hygiene-tero-landing-chore-tero-index-cabal-ready-2026-07-09-appended",
+      "family": "doc",
+      "kind": "section",
+      "title": "Hygiene + Tero landing (chore/tero-index-cabal-ready, 2026-07-09 appended)",
+      "file": "AGENTS.md",
+      "line": 54,
+      "tag": "Empirical/Declared",
+      "summary": "Tero-first (via /root/git/scripts/tero.sh identify + textsearch \"chore tero hygiene check ROADMAP scaffolding\" + cites to AGENTS local-checks, tero-index)."
+    },
+    {
       "anchor": "readme",
       "family": "doc",
       "kind": "other",
@@ -162,6 +172,47 @@
       "line": 59,
       "tag": "Empirical/Declared",
       "summary": "MIT License - see [LICENSE](LICENSE) for details."
+    },
+    {
+      "anchor": "roadmap",
+      "family": "doc",
+      "kind": "note",
+      "title": "py2rust — Roadmap",
+      "file": "docs/ROADMAP.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "status": "Scaffolding / hygiene (2026-07-09)",
+      "summary": "Status: Scaffolding / hygiene (2026-07-09)"
+    },
+    {
+      "anchor": "roadmap--waves-minimal-for-scaffolding",
+      "family": "doc",
+      "kind": "section",
+      "title": "Waves (minimal for scaffolding)",
+      "file": "docs/ROADMAP.md",
+      "line": 9,
+      "tag": "Empirical/Declared",
+      "summary": "- Add scripts/check.sh modeled on search-box/cabal (uv if present, ruff, pytest, tero index gen)"
+    },
+    {
+      "anchor": "roadmap--wave-h-hygiene-tero-closure-this-chore",
+      "family": "doc",
+      "kind": "section",
+      "title": "Wave H — Hygiene & Tero closure (this chore)",
+      "file": "docs/ROADMAP.md",
+      "line": 11,
+      "tag": "Empirical/Declared",
+      "summary": "- Add scripts/check.sh modeled on search-box/cabal (uv if present, ruff, pytest, tero index gen)"
+    },
+    {
+      "anchor": "roadmap--wave-p-polish-integration",
+      "family": "doc",
+      "kind": "section",
+      "title": "Wave P — Polish & Integration",
+      "file": "docs/ROADMAP.md",
+      "line": 17,
+      "tag": "Empirical/Declared",
+      "summary": "- cabal-devmelopner integration + tero for transpiler hints"
     }
   ],
   "flagged": []

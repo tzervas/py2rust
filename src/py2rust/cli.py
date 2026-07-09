@@ -29,7 +29,7 @@ def transpile(python_file, output, module):
     click.echo(f"📦 Module: {module_name}")
 
     # Read and parse Python code
-    with open(python_path, "r") as f:
+    with open(python_path) as f:
         python_code = f.read()
 
     try:
@@ -59,7 +59,7 @@ def analyze(python_file):
 
     click.echo(f"🔍 Analyzing {python_path} for Rust compatibility")
 
-    with open(python_path, "r") as f:
+    with open(python_path) as f:
         python_code = f.read()
 
     try:
@@ -90,7 +90,7 @@ class PythonToRustTranspiler:
         """Transpile Python AST to Rust code."""
         lines = [
             f"// Generated from Python module: {self.module_name}",
-            f"// This is an automated conversion - manual review required!",
+            "// This is an automated conversion - manual review required!",
             "",
         ]
 
@@ -136,17 +136,11 @@ class CompatibilityAnalyzer:
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                issues.append(
-                    f"Import statement '{node.names[0].name}' needs manual conversion"
-                )
+                issues.append(f"Import statement '{node.names[0].name}' needs manual conversion")
             elif isinstance(node, ast.ClassDef):
-                issues.append(
-                    f"Class '{node.name}' needs manual conversion to Rust struct/impl"
-                )
+                issues.append(f"Class '{node.name}' needs manual conversion to Rust struct/impl")
             elif isinstance(node, ast.Try):
-                issues.append(
-                    "Try/except blocks need manual conversion to Rust error handling"
-                )
+                issues.append("Try/except blocks need manual conversion to Rust error handling")
             elif isinstance(node, ast.Lambda):
                 issues.append("Lambda functions need manual conversion")
 

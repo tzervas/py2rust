@@ -1,7 +1,7 @@
 """Tests for py2rust CLI."""
 
-import pytest
 from click.testing import CliRunner
+
 from py2rust.cli import main
 
 

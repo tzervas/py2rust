@@ -51,3 +51,20 @@ Run checks before considering work complete.
 
 Leave mycelium isolated; all coordination here targets the other repos + cabal.
 
+## Hygiene + Tero landing (chore/tero-index-cabal-ready, 2026-07-09 appended)
+
+Tero-first (via /root/git/scripts/tero.sh identify + text_search "chore tero hygiene check ROADMAP scaffolding" + cites to AGENTS local-checks, tero-index).
+
+- Added ruff to dev-deps + [tool.ruff] config in pyproject.toml (parity with cabal).
+- Added scripts/check.sh (modeled on search-box/cabal + tero-mcp): uv sync → ruff format/check/fix, mypy advisory, pytest; + tero index gen.
+- Added minimal docs/ROADMAP.md (scaffolding role, tero/hygiene ready, links workspace plan.md).
+- Appended this (append-only).
+- branch-guard (chore/tero-index-cabal-ready), dev-workflow, -S commits.
+- Land: merge --no-ff → dev push; → main --no-ff push; propagate.
+- Post: update-tero; commit; check.sh; tero.
+- Cites: plan.md p1 hygiene-thin-repos, wsfull-wave...
+
+Use `./scripts/check.sh`. cabal --use-tero supported.
+
+Tero cite: agents--hygiene-tero-landing-2026-07-09-py2rust
+
