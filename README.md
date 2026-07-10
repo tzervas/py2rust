@@ -58,4 +58,5 @@ uv run isort src/
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.## Semver baseline (2026-07-10)
+v0.1.0 py2rust (rust-py helper, extracted supportive from mycelium read-only).
