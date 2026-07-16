@@ -1,11 +1,8 @@
 name: Test
 
+# Manual only — no push/pull_request CI triggers
 on:
-  push:
-    branches: [ main, dev ]
-  pull_request:
-    branches: [ main, dev ]
-
+  workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest

@@ -1,8 +1,7 @@
 name: Release
 
+# Manual only — no push/pull_request CI triggers
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
