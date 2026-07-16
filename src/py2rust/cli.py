@@ -1,6 +1,7 @@
 """Command-line interface for py2rust transpiler."""
 
 import ast
+import sys
 from pathlib import Path
 
 import click
@@ -44,10 +45,10 @@ def transpile(python_file, output, module):
 
     except SyntaxError as e:
         click.echo(f"❌ Python syntax error: {e}", err=True)
-        return 1
+        sys.exit(1)
     except Exception as e:
         click.echo(f"❌ Transpilation failed: {e}", err=True)
-        return 1
+        sys.exit(1)
 
 
 @main.command()
@@ -58,8 +59,12 @@ def analyze(python_file):
 
     click.echo(f"🔍 Analyzing {python_path} for Rust compatibility")
 
-    with open(python_path) as f:
-        python_code = f.read()
+    try:
+        with open(python_path) as f:
+            python_code = f.read()
+    except Exception as e:
+        click.echo(f"❌ Failed to read {python_path}: {e}", err=True)
+        sys.exit(1)
 
     try:
         tree = ast.parse(python_code)
@@ -75,7 +80,10 @@ def analyze(python_file):
 
     except SyntaxError as e:
         click.echo(f"❌ Python syntax error: {e}", err=True)
-        return 1
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"❌ Analysis failed: {e}", err=True)
+        sys.exit(1)
 
 
 class PythonToRustTranspiler:
@@ -109,17 +117,90 @@ class PythonToRustTranspiler:
 
         return lines
 
+    def _map_type(self, node: ast.AST | None, default: str = "i32") -> str:
+        """Map Python type AST node to Rust type representation."""
+        if node is None:
+            return default
+
+        if isinstance(node, ast.Name):
+            mapping = {
+                "int": "i32",
+                "float": "f64",
+                "str": "&str",
+                "bool": "bool",
+            }
+            return mapping.get(node.id, default)
+
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            mapping = {
+                "int": "i32",
+                "float": "f64",
+                "str": "&str",
+                "bool": "bool",
+            }
+            return mapping.get(node.value, default)
+
+        return default
+
+    def _get_return_type(self, returns_node: ast.AST | None) -> str | None:
+        """Get the return type string or None if it returns None / is omitted."""
+        if returns_node is None:
+            return "i32"
+
+        if isinstance(returns_node, ast.Name):
+            if returns_node.id == "None":
+                return None
+            mapping = {
+                "int": "i32",
+                "float": "f64",
+                "str": "&str",
+                "bool": "bool",
+            }
+            return mapping.get(returns_node.id, "i32")
+
+        if isinstance(returns_node, ast.Constant):
+            if returns_node.value is None or returns_node.value == "None":
+                return None
+            if isinstance(returns_node.value, str):
+                mapping = {
+                    "int": "i32",
+                    "float": "f64",
+                    "str": "&str",
+                    "bool": "bool",
+                }
+                return mapping.get(returns_node.value, "i32")
+
+        return "i32"
+
     def _transpile_function(self, func: ast.FunctionDef) -> list[str]:
         """Transpile a Python function to Rust."""
         lines = []
 
         # Function signature
-        args_str = ", ".join(f"{arg.arg}: i32" for arg in func.args.args)  # Simplified
-        return_type = "i32"  # Simplified
+        args_list = []
+        for arg in func.args.args:
+            arg_type = self._map_type(arg.annotation)
+            args_list.append(f"{arg.arg}: {arg_type}")
+        args_str = ", ".join(args_list)
 
-        lines.append(f"fn {func.name}({args_str}) -> {return_type} {{")
+        return_type = self._get_return_type(func.returns)
+
+        if return_type:
+            lines.append(f"fn {func.name}({args_str}) -> {return_type} {{")
+        else:
+            lines.append(f"fn {func.name}({args_str}) {{")
+
         lines.append("    // TODO: Implement function body")
-        lines.append("    0  // Placeholder return")
+
+        if return_type == "i32":
+            lines.append("    0  // Placeholder return")
+        elif return_type == "f64":
+            lines.append("    0.0  // Placeholder return")
+        elif return_type == "bool":
+            lines.append("    false  // Placeholder return")
+        elif return_type == "&str":
+            lines.append('    ""  // Placeholder return')
+
         lines.append("}")
         lines.append("")
 
