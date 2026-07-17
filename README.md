@@ -1,5 +1,10 @@
 # py2rust
 
+<!-- FLEET-BADGES:BEGIN -->
+[![CI](https://github.com/tzervas/py2rust/actions/workflows/fleet-ci.yml/badge.svg?branch=main)](https://github.com/tzervas/py2rust/actions/workflows/fleet-ci.yml?query=branch%3Amain)
+[![Security](https://github.com/tzervas/py2rust/actions/workflows/fleet-security.yml/badge.svg?branch=main)](https://github.com/tzervas/py2rust/actions/workflows/fleet-security.yml?query=branch%3Amain)
+<!-- FLEET-BADGES:END -->
+
 **Rust-first** Python → Rust transpiler with an honesty-first gap model.
 
 Unlowered Python is reported as structured **gap categories** (never silent success). Basic typed functions can emit best-effort Rust; everything else is flagged in a sibling `.gap.json`.
