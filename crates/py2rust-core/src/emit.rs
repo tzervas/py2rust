@@ -58,7 +58,9 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             Some(ann) if is_any_annotation(ann) => {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!("parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"),
+                    format!(
+                        "parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"
+                    ),
                 ));
                 "/* Any */ i32".to_string()
             }
@@ -91,9 +93,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             if !is_pass_only_body(&func.body) {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!(
-                        "function `{name}` has no return annotation — dynamic typing (README)"
-                    ),
+                    format!("function `{name}` has no return annotation — dynamic typing (README)"),
                 ));
             }
             ("i32".to_string(), false)
@@ -127,9 +127,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         None => {
             sub_gaps.push(GapReason::new(
                 Category::FunctionBody,
-                format!(
-                    "function body of `{name}` not lowered — flag not guess (no silent TODO)"
-                ),
+                format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
             if ret_is_unit {
                 "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
@@ -254,9 +252,7 @@ fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReas
             ast::Stmt::Try(_) | ast::Stmt::TryStar(_) | ast::Stmt::Raise(_) => {
                 out.push(GapReason::new(
                     Category::Exception,
-                    format!(
-                        "exception handling inside `{fname}` not lowered (README Exception)"
-                    ),
+                    format!("exception handling inside `{fname}` not lowered (README Exception)"),
                 ));
             }
             ast::Stmt::Expr(e) => {
@@ -341,8 +337,7 @@ pub fn class_gap_reason(class: &ast::StmtClassDef) -> GapReason {
             .unwrap_or(false)
     });
     let mut reason = format!(
-        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)"
-        ,
+        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)",
         class.name
     );
     if meta {
