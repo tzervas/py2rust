@@ -1,0 +1,5 @@
+[toolchain]
+# MSRV declared in workspace Cargo.toml (rust-version = "1.85").
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

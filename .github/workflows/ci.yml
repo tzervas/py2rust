@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - develop
+  pull_request:
+    branches:
+      - main
+      - dev
+      - develop
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: cargo check + test
+    runs-on: [self-hosted, linux, x64, podman]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: cargo check --workspace
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets
+
+      - name: CLI smoke
+        run: |
+          cargo run -p py2rust -- version
+          printf 'def add(x: int, y: int) -> int:\n    return x + y\n' > /tmp/p25_smoke.py
+          cargo run -p py2rust -- analyze /tmp/p25_smoke.py
+          cargo run -p py2rust -- transpile /tmp/p25_smoke.py -o /tmp/p25_smoke.rs
+          test -f /tmp/p25_smoke.rs
+          test -f /tmp/p25_smoke.gap.json

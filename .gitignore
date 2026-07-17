@@ -8,3 +8,17 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Generated transpile artifacts (local smoke)
+*.gap.json
+!research/**/*.gap.json
