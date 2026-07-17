@@ -1,5 +1,10 @@
 # py2rust
 
+<!-- FLEET-BADGES:BEGIN -->
+[![CI](https://github.com/tzervas/py2rust/actions/workflows/fleet-ci.yml/badge.svg?branch=main)](https://github.com/tzervas/py2rust/actions/workflows/fleet-ci.yml?query=branch%3Amain)
+[![Security](https://github.com/tzervas/py2rust/actions/workflows/fleet-security.yml/badge.svg?branch=main)](https://github.com/tzervas/py2rust/actions/workflows/fleet-security.yml?query=branch%3Amain)
+<!-- FLEET-BADGES:END -->
+
 Python to Rust transpiler and code conversion assistant.
 
 ## Installation
