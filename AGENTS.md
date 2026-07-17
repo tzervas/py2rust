@@ -35,9 +35,18 @@ This project is prepared for integration:
 
 ## Local checks
 
-Look for:
-- scripts/check.sh
-- Cargo.toml / pyproject.toml + standard commands (cargo test, uv run pytest, ruff, etc.)
+Prefer the **Rust** product path:
+
+```bash
+cargo test --workspace
+cargo run -p py2rust -- version
+cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simple_fn.py
+cargo run -p py2rust -- transpile crates/py2rust-core/fixtures/mixed.py -o /tmp/mixed.rs
+```
+
+Also available:
+- `./scripts/check.sh` (Python hygiene when needed)
+- `CLAUDE.md` — short CLI cheat-sheet
 
 Run checks before considering work complete.
 
