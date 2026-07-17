@@ -1,0 +1,19 @@
+[package]
+name = "py2rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Python → Rust transpiler CLI (analyze / transpile)"
+readme = "../../README.md"
+
+[[bin]]
+name = "py2rust"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+py2rust-core.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/py2rust",
+    "crates/py2rust-core",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/tzervas/py2rust"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+py2rust-core = { path = "crates/py2rust-core" }
+rustpython-parser = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
