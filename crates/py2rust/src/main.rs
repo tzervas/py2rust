@@ -77,7 +77,7 @@ fn run() -> Result<()> {
                 .with_context(|| format!("read {}", python_file.display()))?;
             let label = python_file.display().to_string();
             let report = analyze_source(&source, &label)?;
-            write_gap(&report, gap_out.as_deref().unwrap_or(python_file.as_path()))?;
+            write_gap_or_sidecar(&report, gap_out.as_deref(), python_file.as_path())?;
             if json {
                 println!("{}", report.to_json_pretty()?);
             } else {
@@ -107,8 +107,7 @@ fn run() -> Result<()> {
                 }
             }
             std::fs::write(&out, &rust).with_context(|| format!("write {}", out.display()))?;
-            let gap_target = gap_out.as_deref().unwrap_or(out.as_path());
-            write_gap(&report, gap_target)?;
+            write_gap_or_sidecar(&report, gap_out.as_deref(), out.as_path())?;
             eprintln!(
                 "wrote {} (emitted={}, gaps={}, expressible={:.0}%)",
                 out.display(),
@@ -126,12 +125,35 @@ fn run() -> Result<()> {
     }
 }
 
-fn write_gap(report: &GapReport, path_for_stem: &Path) -> Result<PathBuf> {
-    let written = report
-        .write_sidecar(path_for_stem)
-        .with_context(|| format!("write gap sidecar for {}", path_for_stem.display()))?;
-    eprintln!("wrote {}", written.display());
-    Ok(written)
+fn write_gap_or_sidecar(
+    report: &GapReport,
+    gap_out: Option<&Path>,
+    default_path_for_sidecar: &Path,
+) -> Result<PathBuf> {
+    if let Some(custom) = gap_out {
+        if let Some(parent) = custom.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            }
+        }
+        report
+            .write_json_file(custom)
+            .with_context(|| format!("write gap report to {}", custom.display()))?;
+        eprintln!("wrote {}", custom.display());
+        Ok(custom.to_path_buf())
+    } else {
+        let written = report
+            .write_sidecar(default_path_for_sidecar)
+            .with_context(|| {
+                format!(
+                    "write gap sidecar for {}",
+                    default_path_for_sidecar.display()
+                )
+            })?;
+        eprintln!("wrote {}", written.display());
+        Ok(written)
+    }
 }
 
 fn print_human_summary(report: &GapReport) {
@@ -169,5 +191,40 @@ mod tests {
             transpile_source("def f(x: int) -> int:\n    return 1\n", "t.py", None).unwrap();
         assert_eq!(r.emitted_items.len(), 1);
         assert!(rust.contains("fn f"));
+    }
+
+    #[test]
+    fn test_write_gap_or_sidecar() {
+        use super::write_gap_or_sidecar;
+        use py2rust_core::GapReport;
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir();
+        let report = GapReport::new("test.py", 0);
+
+        // Test with custom gap_out path
+        let custom_out = temp_dir.join("py2rust_test_custom_gap_out_1.json");
+        if custom_out.exists() {
+            let _ = fs::remove_file(&custom_out);
+        }
+        let result_path =
+            write_gap_or_sidecar(&report, Some(&custom_out), &temp_dir.join("fallback.py"))
+                .unwrap();
+        assert_eq!(result_path, custom_out);
+        assert!(custom_out.exists());
+        let content = fs::read_to_string(&custom_out).unwrap();
+        assert!(content.contains("\"schema_version\""));
+        let _ = fs::remove_file(&custom_out);
+
+        // Test with fallback / sidecar path
+        let fallback_py = temp_dir.join("py2rust_test_fallback.py");
+        let expected_sidecar = temp_dir.join("py2rust_test_fallback.gap.json");
+        if expected_sidecar.exists() {
+            let _ = fs::remove_file(&expected_sidecar);
+        }
+        let result_path2 = write_gap_or_sidecar(&report, None, &fallback_py).unwrap();
+        assert_eq!(result_path2, expected_sidecar);
+        assert!(expected_sidecar.exists());
+        let _ = fs::remove_file(&expected_sidecar);
     }
 }

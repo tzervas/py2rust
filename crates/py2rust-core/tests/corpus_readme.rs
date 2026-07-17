@@ -15,7 +15,10 @@ fn readme_classes_and_inheritance_are_class_gaps() {
 fn readme_exception_handling_is_exception_gap() {
     let src = "try:\n    x = 1\nexcept Exception:\n    x = 0\n";
     let report = analyze_source(src, "exc.py").unwrap();
-    assert!(report.gaps.iter().any(|g| g.category == Category::Exception));
+    assert!(report
+        .gaps
+        .iter()
+        .any(|g| g.category == Category::Exception));
 }
 
 #[test]
@@ -36,28 +39,22 @@ fn readme_dynamic_typing_when_types_missing() {
 fn readme_metaprogramming_decorators_and_eval() {
     let deco = "@cache\ndef g(x: int) -> int:\n    return x\n";
     let report = analyze_source(deco, "deco.py").unwrap();
-    assert!(
-        report
-            .gaps
-            .iter()
-            .any(|g| g.category == Category::Metaprogramming)
-    );
+    assert!(report
+        .gaps
+        .iter()
+        .any(|g| g.category == Category::Metaprogramming));
 
     let ev = "eval('1')\n";
     let report = analyze_source(ev, "eval.py").unwrap();
-    assert!(
-        report
-            .gaps
-            .iter()
-            .any(|g| g.category == Category::Metaprogramming)
-    );
+    assert!(report
+        .gaps
+        .iter()
+        .any(|g| g.category == Category::Metaprogramming));
 }
 
 #[test]
 fn coverage_bound_emitted_plus_gaps() {
     let src = "import sys\ndef ok(a: int) -> int:\n    return a\nclass C: pass\n";
     let report = analyze_source(src, "cov.py").unwrap();
-    assert!(
-        report.emitted_items.len() + report.gaps.len() >= report.total_top_level_items
-    );
+    assert!(report.emitted_items.len() + report.gaps.len() >= report.total_top_level_items);
 }
