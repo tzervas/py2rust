@@ -58,7 +58,9 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             Some(ann) if is_any_annotation(ann) => {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!("parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"),
+                    format!(
+                        "parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"
+                    ),
                 ));
                 "/* Any */ i32".to_string()
             }
@@ -91,9 +93,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             if !is_pass_only_body(&func.body) {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!(
-                        "function `{name}` has no return annotation — dynamic typing (README)"
-                    ),
+                    format!("function `{name}` has no return annotation — dynamic typing (README)"),
                 ));
             }
             ("i32".to_string(), false)
@@ -127,9 +127,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         None => {
             sub_gaps.push(GapReason::new(
                 Category::FunctionBody,
-                format!(
-                    "function body of `{name}` not lowered — flag not guess (no silent TODO)"
-                ),
+                format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
             if ret_is_unit {
                 "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
@@ -254,9 +252,7 @@ fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReas
             ast::Stmt::Try(_) | ast::Stmt::TryStar(_) | ast::Stmt::Raise(_) => {
                 out.push(GapReason::new(
                     Category::Exception,
-                    format!(
-                        "exception handling inside `{fname}` not lowered (README Exception)"
-                    ),
+                    format!("exception handling inside `{fname}` not lowered (README Exception)"),
                 ));
             }
             ast::Stmt::Expr(e) => {
@@ -293,38 +289,189 @@ fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReas
     }
 }
 
-fn contains_lambda(expr: &ast::Expr) -> bool {
+/// Walk a Python expression tree recursively, invoking `f` on every sub-expression.
+pub fn walk_expr<F>(expr: &ast::Expr, f: &mut F)
+where
+    F: FnMut(&ast::Expr),
+{
+    f(expr);
     match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
+        ast::Expr::BoolOp(b) => {
+            for val in &b.values {
+                walk_expr(val, f);
+            }
         }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::UnaryOp(u) => contains_lambda(&u.operand),
+        ast::Expr::NamedExpr(n) => {
+            walk_expr(&n.target, f);
+            walk_expr(&n.value, f);
+        }
+        ast::Expr::BinOp(b) => {
+            walk_expr(&b.left, f);
+            walk_expr(&b.right, f);
+        }
+        ast::Expr::UnaryOp(u) => {
+            walk_expr(&u.operand, f);
+        }
+        ast::Expr::Lambda(l) => {
+            walk_expr(&l.body, f);
+        }
         ast::Expr::IfExp(i) => {
-            contains_lambda(&i.test) || contains_lambda(&i.body) || contains_lambda(&i.orelse)
+            walk_expr(&i.test, f);
+            walk_expr(&i.body, f);
+            walk_expr(&i.orelse, f);
         }
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        _ => false,
+        ast::Expr::Dict(d) => {
+            for k in &d.keys {
+                if let Some(key) = k {
+                    walk_expr(key, f);
+                }
+            }
+            for v in &d.values {
+                walk_expr(v, f);
+            }
+        }
+        ast::Expr::Set(s) => {
+            for elt in &s.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::ListComp(lc) => {
+            walk_expr(&lc.elt, f);
+            for gen in &lc.generators {
+                walk_expr(&gen.target, f);
+                walk_expr(&gen.iter, f);
+                for ifs in &gen.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::SetComp(sc) => {
+            walk_expr(&sc.elt, f);
+            for gen in &sc.generators {
+                walk_expr(&gen.target, f);
+                walk_expr(&gen.iter, f);
+                for ifs in &gen.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::DictComp(dc) => {
+            walk_expr(&dc.key, f);
+            walk_expr(&dc.value, f);
+            for gen in &dc.generators {
+                walk_expr(&gen.target, f);
+                walk_expr(&gen.iter, f);
+                for ifs in &gen.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::GeneratorExp(ge) => {
+            walk_expr(&ge.elt, f);
+            for gen in &ge.generators {
+                walk_expr(&gen.target, f);
+                walk_expr(&gen.iter, f);
+                for ifs in &gen.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::Await(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Yield(y) => {
+            if let Some(val) = &y.value {
+                walk_expr(val, f);
+            }
+        }
+        ast::Expr::YieldFrom(yf) => {
+            walk_expr(&yf.value, f);
+        }
+        ast::Expr::Compare(c) => {
+            walk_expr(&c.left, f);
+            for comp in &c.comparators {
+                walk_expr(comp, f);
+            }
+        }
+        ast::Expr::Call(c) => {
+            walk_expr(&c.func, f);
+            for arg in &c.args {
+                walk_expr(arg, f);
+            }
+            for kw in &c.keywords {
+                walk_expr(&kw.value, f);
+            }
+        }
+        ast::Expr::FormattedValue(fv) => {
+            walk_expr(&fv.value, f);
+            if let Some(spec) = &fv.format_spec {
+                walk_expr(spec, f);
+            }
+        }
+        ast::Expr::JoinedStr(js) => {
+            for val in &js.values {
+                walk_expr(val, f);
+            }
+        }
+        ast::Expr::Attribute(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Subscript(s) => {
+            walk_expr(&s.value, f);
+            walk_expr(&s.slice, f);
+        }
+        ast::Expr::Starred(s) => {
+            walk_expr(&s.value, f);
+        }
+        ast::Expr::List(l) => {
+            for elt in &l.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Tuple(t) => {
+            for elt in &t.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Slice(s) => {
+            if let Some(lower) = &s.lower {
+                walk_expr(lower, f);
+            }
+            if let Some(upper) = &s.upper {
+                walk_expr(upper, f);
+            }
+            if let Some(step) = &s.step {
+                walk_expr(step, f);
+            }
+        }
+        ast::Expr::Constant(_) | ast::Expr::Name(_) => {}
     }
 }
 
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
+/// Recursively check if an expression contains a lambda.
+pub fn contains_lambda(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if let ast::Expr::Lambda(_) = e {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Recursively check if an expression contains an exec or eval call.
+pub fn contains_exec_eval(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if let ast::Expr::Call(c) = e {
             if let ast::Expr::Name(n) = c.func.as_ref() {
-                if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
-                    return true;
+                if matches!(n.id.as_str(), "exec" | "eval") {
+                    found = true;
                 }
             }
-            c.args.iter().any(contains_exec_eval)
-                || c.keywords.iter().any(|k| contains_exec_eval(&k.value))
         }
-        _ => false,
-    }
+    });
+    found
 }
 
 /// Placeholder for class emission — always a hard gap at dispatch layer.
@@ -341,8 +488,7 @@ pub fn class_gap_reason(class: &ast::StmtClassDef) -> GapReason {
             .unwrap_or(false)
     });
     let mut reason = format!(
-        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)"
-        ,
+        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)",
         class.name
     );
     if meta {
