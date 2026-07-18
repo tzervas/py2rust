@@ -29,7 +29,7 @@ def transpile(python_file, output, module):
     click.echo(f"📦 Module: {module_name}")
 
     # Read and parse Python code
-    with open(python_path) as f:
+    with open(python_path, encoding="utf-8") as f:
         python_code = f.read()
 
     try:
@@ -38,7 +38,7 @@ def transpile(python_file, output, module):
         rust_code = transpiler.transpile(tree)
 
         # Write Rust code
-        with open(output_path, "w") as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             f.write(rust_code)
 
         click.echo("✅ Transpilation completed successfully")
@@ -60,7 +60,7 @@ def analyze(python_file):
     click.echo(f"🔍 Analyzing {python_path} for Rust compatibility")
 
     try:
-        with open(python_path) as f:
+        with open(python_path, encoding="utf-8") as f:
             python_code = f.read()
     except Exception as e:
         click.echo(f"❌ Failed to read {python_path}: {e}", err=True)
