@@ -29,7 +29,7 @@ pub fn snippet(source: &str, start: u32, end: u32, max_chars: usize) -> String {
     let raw = &source[start..end];
     let mut out: String = raw.chars().take(max_chars).collect();
     if raw.chars().count() > max_chars {
-        out.push_str("…");
+        out.push('…');
     }
     // Collapse interior newlines for single-line reports.
     out.replace('\n', "\\n")
