@@ -293,38 +293,185 @@ fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReas
     }
 }
 
-fn contains_lambda(expr: &ast::Expr) -> bool {
+/// Recursively walk a Python expression AST node, applying a callback on each nested expression.
+pub fn walk_expr<F>(expr: &ast::Expr, f: &mut F)
+where
+    F: FnMut(&ast::Expr),
+{
+    f(expr);
     match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
+        ast::Expr::BoolOp(b) => {
+            for val in &b.values {
+                walk_expr(val, f);
+            }
         }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::UnaryOp(u) => contains_lambda(&u.operand),
+        ast::Expr::NamedExpr(n) => {
+            walk_expr(&n.target, f);
+            walk_expr(&n.value, f);
+        }
+        ast::Expr::BinOp(b) => {
+            walk_expr(&b.left, f);
+            walk_expr(&b.right, f);
+        }
+        ast::Expr::UnaryOp(u) => {
+            walk_expr(&u.operand, f);
+        }
+        ast::Expr::Lambda(l) => {
+            walk_expr(&l.body, f);
+        }
         ast::Expr::IfExp(i) => {
-            contains_lambda(&i.test) || contains_lambda(&i.body) || contains_lambda(&i.orelse)
+            walk_expr(&i.test, f);
+            walk_expr(&i.body, f);
+            walk_expr(&i.orelse, f);
         }
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        _ => false,
+        ast::Expr::Dict(d) => {
+            for key in d.keys.iter().flatten() {
+                walk_expr(key, f);
+            }
+            for v in &d.values {
+                walk_expr(v, f);
+            }
+        }
+        ast::Expr::Set(s) => {
+            for elt in &s.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::ListComp(lc) => {
+            walk_expr(&lc.elt, f);
+            for comp in &lc.generators {
+                walk_expr(&comp.target, f);
+                walk_expr(&comp.iter, f);
+                for cond in &comp.ifs {
+                    walk_expr(cond, f);
+                }
+            }
+        }
+        ast::Expr::SetComp(sc) => {
+            walk_expr(&sc.elt, f);
+            for comp in &sc.generators {
+                walk_expr(&comp.target, f);
+                walk_expr(&comp.iter, f);
+                for cond in &comp.ifs {
+                    walk_expr(cond, f);
+                }
+            }
+        }
+        ast::Expr::DictComp(dc) => {
+            walk_expr(&dc.key, f);
+            walk_expr(&dc.value, f);
+            for comp in &dc.generators {
+                walk_expr(&comp.target, f);
+                walk_expr(&comp.iter, f);
+                for cond in &comp.ifs {
+                    walk_expr(cond, f);
+                }
+            }
+        }
+        ast::Expr::GeneratorExp(ge) => {
+            walk_expr(&ge.elt, f);
+            for comp in &ge.generators {
+                walk_expr(&comp.target, f);
+                walk_expr(&comp.iter, f);
+                for cond in &comp.ifs {
+                    walk_expr(cond, f);
+                }
+            }
+        }
+        ast::Expr::Await(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Yield(y) => {
+            if let Some(val) = &y.value {
+                walk_expr(val, f);
+            }
+        }
+        ast::Expr::YieldFrom(yf) => {
+            walk_expr(&yf.value, f);
+        }
+        ast::Expr::Compare(c) => {
+            walk_expr(&c.left, f);
+            for comparator in &c.comparators {
+                walk_expr(comparator, f);
+            }
+        }
+        ast::Expr::Call(c) => {
+            walk_expr(&c.func, f);
+            for arg in &c.args {
+                walk_expr(arg, f);
+            }
+            for kw in &c.keywords {
+                walk_expr(&kw.value, f);
+            }
+        }
+        ast::Expr::FormattedValue(fv) => {
+            walk_expr(&fv.value, f);
+            if let Some(spec) = &fv.format_spec {
+                walk_expr(spec, f);
+            }
+        }
+        ast::Expr::JoinedStr(js) => {
+            for val in &js.values {
+                walk_expr(val, f);
+            }
+        }
+        ast::Expr::Attribute(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Subscript(s) => {
+            walk_expr(&s.value, f);
+            walk_expr(&s.slice, f);
+        }
+        ast::Expr::Starred(s) => {
+            walk_expr(&s.value, f);
+        }
+        ast::Expr::List(l) => {
+            for elt in &l.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Tuple(t) => {
+            for elt in &t.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Slice(s) => {
+            if let Some(lower) = &s.lower {
+                walk_expr(lower, f);
+            }
+            if let Some(upper) = &s.upper {
+                walk_expr(upper, f);
+            }
+            if let Some(step) = &s.step {
+                walk_expr(step, f);
+            }
+        }
+        ast::Expr::Constant(_) | ast::Expr::Name(_) => {}
     }
 }
 
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
+pub fn contains_lambda(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if matches!(e, ast::Expr::Lambda(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+pub fn contains_exec_eval(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if let ast::Expr::Call(c) = e {
             if let ast::Expr::Name(n) = c.func.as_ref() {
-                if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
-                    return true;
+                if matches!(n.id.as_str(), "exec" | "eval") {
+                    found = true;
                 }
             }
-            c.args.iter().any(contains_exec_eval)
-                || c.keywords.iter().any(|k| contains_exec_eval(&k.value))
         }
-        _ => false,
-    }
+    });
+    found
 }
 
 /// Placeholder for class emission — always a hard gap at dispatch layer.
