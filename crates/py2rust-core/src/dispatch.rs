@@ -4,7 +4,7 @@
 //! never neither. Ported process from mycelium-transpile `transpile::dispatch_item`, adapted
 //! to Python `Stmt` variants.
 
-use crate::emit::{class_gap_reason, emit_function, Emitted};
+use crate::emit::{class_gap_reason, emit_function, Emitted, contains_lambda, contains_exec_eval};
 use crate::gap::{Category, Gap, GapReport};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
@@ -390,35 +390,6 @@ fn body_has_exec_eval(body: &[ast::Stmt]) -> bool {
     })
 }
 
-fn contains_lambda(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
-        }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        ast::Expr::Dict(d) => d.values.iter().any(contains_lambda),
-        _ => false,
-    }
-}
-
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
-            if let ast::Expr::Name(n) = c.func.as_ref() {
-                if matches!(n.id.as_str(), "exec" | "eval") {
-                    return true;
-                }
-            }
-            c.args.iter().any(contains_exec_eval)
-        }
-        _ => false,
-    }
-}
 
 fn is_comprehension(expr: &ast::Expr) -> bool {
     matches!(
