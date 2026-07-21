@@ -85,6 +85,32 @@ fn simple_fn_emits_typed_functions() {
 }
 
 #[test]
+fn test_comparison_boolean_ternary_lowering() {
+    let src = r#"
+def is_equal(x: int, y: int) -> bool:
+    return x == y
+
+def logical_or(a: bool, b: bool) -> bool:
+    return a or b
+
+def ternary_expr(x: int) -> int:
+    return 1 if x > 0 else 0
+"#;
+    let (report, rust) = transpile_source(src, "expr_tests.py", None).unwrap();
+    assert_eq!(report.emitted_items.len(), 3);
+    assert!(report.gaps.is_empty(), "expected no gaps for supported logical and comparison expressions, got: {:?}", report.gaps);
+
+    assert!(rust.contains("fn is_equal"), "Expected is_equal: {}", rust);
+    assert!(rust.contains("(x == y)"), "Expected == comparison: {}", rust);
+
+    assert!(rust.contains("fn logical_or"), "Expected logical_or: {}", rust);
+    assert!(rust.contains("(a || b)"), "Expected logical or: {}", rust);
+
+    assert!(rust.contains("fn ternary_expr"), "Expected ternary_expr: {}", rust);
+    assert!(rust.contains("(if (x > 0) { 1 } else { 0 })"), "Expected ternary conditional: {}", rust);
+}
+
+#[test]
 fn class_only_produces_class_gaps() {
     let (label, source) = fixture("class_only.py");
     let report = analyze_source(&source, &label).unwrap();
