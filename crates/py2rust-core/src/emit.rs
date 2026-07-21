@@ -233,6 +233,45 @@ fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
                 ast::UnaryOp::Invert => Some(format!("(!{operand})")),
             }
         }
+        ast::Expr::Compare(c) => {
+            if c.ops.len() == 1 && c.comparators.len() == 1 {
+                let left = lower_simple_expr(&c.left)?;
+                let right = lower_simple_expr(&c.comparators[0])?;
+                let op = match c.ops[0] {
+                    ast::CmpOp::Eq => "==",
+                    ast::CmpOp::NotEq => "!=",
+                    ast::CmpOp::Lt => "<",
+                    ast::CmpOp::LtE => "<=",
+                    ast::CmpOp::Gt => ">",
+                    ast::CmpOp::GtE => ">=",
+                    _ => return None,
+                };
+                Some(format!("({left} {op} {right})"))
+            } else {
+                None
+            }
+        }
+        ast::Expr::BoolOp(b) => {
+            let op = match b.op {
+                ast::BoolOp::And => "&&",
+                ast::BoolOp::Or => "||",
+            };
+            let mut parts = Vec::new();
+            for val in &b.values {
+                parts.push(lower_simple_expr(val)?);
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(format!("({})", parts.join(&format!(" {op} "))))
+            }
+        }
+        ast::Expr::IfExp(i) => {
+            let test = lower_simple_expr(&i.test)?;
+            let body = lower_simple_expr(&i.body)?;
+            let orelse = lower_simple_expr(&i.orelse)?;
+            Some(format!("(if {test} {{ {body} }} else {{ {orelse} }})"))
+        }
         _ => None,
     }
 }
