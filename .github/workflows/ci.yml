@@ -20,6 +20,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Add cargo to PATH
+        run: |
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Rust toolchain
         run: |
           rustc --version
