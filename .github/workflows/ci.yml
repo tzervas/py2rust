@@ -20,10 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Rust toolchain
-        run: |
-          rustc --version
-          cargo --version
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: cargo check --workspace
         run: cargo check --workspace --all-targets
