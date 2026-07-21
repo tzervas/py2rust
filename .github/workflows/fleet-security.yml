@@ -26,18 +26,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Run gitleaks
-        run: |
-          set -euo pipefail
-          if command -v gitleaks >/dev/null 2>&1; then
-            gitleaks detect --source . --verbose --redact
-          elif command -v docker >/dev/null 2>&1; then
-            docker run --rm -v "$PWD:/path" zricethezav/gitleaks:latest detect --source=/path --verbose --redact
-          elif command -v podman >/dev/null 2>&1; then
-            podman run --rm -v "$PWD:/path:ro" docker.io/zricethezav/gitleaks:latest detect --source=/path --verbose --redact
-          else
-            echo "gitleaks not available on runner — FAIL (honest security gate)" >&2
-            exit 1
-          fi
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   trivy-fs:
     name: trivy filesystem (vuln+secret+license)
