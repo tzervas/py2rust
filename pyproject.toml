@@ -34,6 +34,9 @@ dev-dependencies = [
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+exclude = [
+    "crates/py2rust-core/fixtures",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
