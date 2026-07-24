@@ -58,7 +58,9 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             Some(ann) if is_any_annotation(ann) => {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!("parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"),
+                    format!(
+                        "parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"
+                    ),
                 ));
                 "/* Any */ i32".to_string()
             }
@@ -91,9 +93,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             if !is_pass_only_body(&func.body) {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!(
-                        "function `{name}` has no return annotation — dynamic typing (README)"
-                    ),
+                    format!("function `{name}` has no return annotation — dynamic typing (README)"),
                 ));
             }
             ("i32".to_string(), false)
@@ -127,9 +127,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         None => {
             sub_gaps.push(GapReason::new(
                 Category::FunctionBody,
-                format!(
-                    "function body of `{name}` not lowered — flag not guess (no silent TODO)"
-                ),
+                format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
             if ret_is_unit {
                 "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
@@ -249,82 +247,483 @@ fn constant_to_rust(c: &ast::Constant) -> Option<String> {
 }
 
 fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReason>) {
+    let out_cell = std::cell::RefCell::new(out);
     for stmt in body {
-        match stmt {
-            ast::Stmt::Try(_) | ast::Stmt::TryStar(_) | ast::Stmt::Raise(_) => {
-                out.push(GapReason::new(
-                    Category::Exception,
-                    format!(
-                        "exception handling inside `{fname}` not lowered (README Exception)"
-                    ),
-                ));
-            }
-            ast::Stmt::Expr(e) => {
-                if contains_lambda(&e.value) {
-                    out.push(GapReason::new(
+        walk_stmt(
+            stmt,
+            &mut |s| match s {
+                ast::Stmt::Try(_) | ast::Stmt::TryStar(_) | ast::Stmt::Raise(_) => {
+                    out_cell.borrow_mut().push(GapReason::new(
+                        Category::Exception,
+                        format!(
+                            "exception handling inside `{fname}` not lowered (README Exception)"
+                        ),
+                    ));
+                }
+                ast::Stmt::FunctionDef(_) | ast::Stmt::AsyncFunctionDef(_) => {
+                    out_cell.borrow_mut().push(GapReason::new(
+                        Category::Other,
+                        format!("nested function inside `{fname}` not lowered in this phase"),
+                    ));
+                }
+                ast::Stmt::ClassDef(c) => {
+                    out_cell.borrow_mut().push(GapReason::new(
+                        Category::Class,
+                        format!(
+                            "nested class `{}` inside `{fname}` not lowered (README Class)",
+                            c.name
+                        ),
+                    ));
+                }
+                _ => {}
+            },
+            &mut |expr| {
+                if matches!(expr, ast::Expr::Lambda(_)) {
+                    out_cell.borrow_mut().push(GapReason::new(
                         Category::Lambda,
                         format!("lambda inside `{fname}` not lowered"),
                     ));
                 }
-                if contains_exec_eval(&e.value) {
-                    out.push(GapReason::new(
-                        Category::Metaprogramming,
-                        format!("exec/eval inside `{fname}` not lowered (README Metaprogramming)"),
-                    ));
+                if let ast::Expr::Call(c) = expr {
+                    if let ast::Expr::Name(n) = c.func.as_ref() {
+                        if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
+                            out_cell.borrow_mut().push(GapReason::new(
+                                Category::Metaprogramming,
+                                format!("exec/eval inside `{fname}` not lowered (README Metaprogramming)"),
+                            ));
+                        }
+                    }
+                }
+            },
+        );
+    }
+}
+
+/// Recursively walk a Python expression AST.
+pub fn walk_expr(expr: &ast::Expr, f: &mut impl FnMut(&ast::Expr)) {
+    f(expr);
+    match expr {
+        ast::Expr::BoolOp(b) => {
+            for value in &b.values {
+                walk_expr(value, f);
+            }
+        }
+        ast::Expr::NamedExpr(n) => {
+            walk_expr(&n.target, f);
+            walk_expr(&n.value, f);
+        }
+        ast::Expr::BinOp(b) => {
+            walk_expr(&b.left, f);
+            walk_expr(&b.right, f);
+        }
+        ast::Expr::UnaryOp(u) => {
+            walk_expr(&u.operand, f);
+        }
+        ast::Expr::Lambda(l) => {
+            for arg in l
+                .args
+                .posonlyargs
+                .iter()
+                .chain(l.args.args.iter())
+                .chain(l.args.kwonlyargs.iter())
+            {
+                if let Some(def) = &arg.def.annotation {
+                    walk_expr(def, f);
                 }
             }
-            ast::Stmt::FunctionDef(_) | ast::Stmt::AsyncFunctionDef(_) => {
-                out.push(GapReason::new(
-                    Category::Other,
-                    format!("nested function inside `{fname}` not lowered in this phase"),
-                ));
-            }
-            ast::Stmt::ClassDef(c) => {
-                out.push(GapReason::new(
-                    Category::Class,
-                    format!(
-                        "nested class `{}` inside `{fname}` not lowered (README Class)",
-                        c.name
-                    ),
-                ));
-            }
-            _ => {}
+            walk_expr(&l.body, f);
         }
-    }
-}
-
-fn contains_lambda(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
-        }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::UnaryOp(u) => contains_lambda(&u.operand),
         ast::Expr::IfExp(i) => {
-            contains_lambda(&i.test) || contains_lambda(&i.body) || contains_lambda(&i.orelse)
+            walk_expr(&i.test, f);
+            walk_expr(&i.body, f);
+            walk_expr(&i.orelse, f);
         }
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        _ => false,
+        ast::Expr::Dict(d) => {
+            for k in d.keys.iter().flatten() {
+                walk_expr(k, f);
+            }
+            for v in &d.values {
+                walk_expr(v, f);
+            }
+        }
+        ast::Expr::Set(s) => {
+            for elt in &s.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::ListComp(lc) => {
+            walk_expr(&lc.elt, f);
+            for generator in &lc.generators {
+                walk_expr(&generator.target, f);
+                walk_expr(&generator.iter, f);
+                for ifs in &generator.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::SetComp(sc) => {
+            walk_expr(&sc.elt, f);
+            for generator in &sc.generators {
+                walk_expr(&generator.target, f);
+                walk_expr(&generator.iter, f);
+                for ifs in &generator.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::DictComp(dc) => {
+            walk_expr(&dc.key, f);
+            walk_expr(&dc.value, f);
+            for generator in &dc.generators {
+                walk_expr(&generator.target, f);
+                walk_expr(&generator.iter, f);
+                for ifs in &generator.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::GeneratorExp(ge) => {
+            walk_expr(&ge.elt, f);
+            for generator in &ge.generators {
+                walk_expr(&generator.target, f);
+                walk_expr(&generator.iter, f);
+                for ifs in &generator.ifs {
+                    walk_expr(ifs, f);
+                }
+            }
+        }
+        ast::Expr::Await(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Yield(y) => {
+            if let Some(value) = &y.value {
+                walk_expr(value, f);
+            }
+        }
+        ast::Expr::YieldFrom(yf) => {
+            walk_expr(&yf.value, f);
+        }
+        ast::Expr::Compare(c) => {
+            walk_expr(&c.left, f);
+            for comparator in &c.comparators {
+                walk_expr(comparator, f);
+            }
+        }
+        ast::Expr::Call(c) => {
+            walk_expr(&c.func, f);
+            for arg in &c.args {
+                walk_expr(arg, f);
+            }
+            for kw in &c.keywords {
+                walk_expr(&kw.value, f);
+            }
+        }
+        ast::Expr::FormattedValue(fv) => {
+            walk_expr(&fv.value, f);
+            if let Some(format_spec) = &fv.format_spec {
+                walk_expr(format_spec, f);
+            }
+        }
+        ast::Expr::JoinedStr(js) => {
+            for value in &js.values {
+                walk_expr(value, f);
+            }
+        }
+        ast::Expr::Constant(_) => {}
+        ast::Expr::Attribute(a) => {
+            walk_expr(&a.value, f);
+        }
+        ast::Expr::Subscript(s) => {
+            walk_expr(&s.value, f);
+            walk_expr(&s.slice, f);
+        }
+        ast::Expr::Starred(s) => {
+            walk_expr(&s.value, f);
+        }
+        ast::Expr::Name(_) => {}
+        ast::Expr::List(l) => {
+            for elt in &l.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Tuple(t) => {
+            for elt in &t.elts {
+                walk_expr(elt, f);
+            }
+        }
+        ast::Expr::Slice(s) => {
+            if let Some(lower) = &s.lower {
+                walk_expr(lower, f);
+            }
+            if let Some(upper) = &s.upper {
+                walk_expr(upper, f);
+            }
+            if let Some(step) = &s.step {
+                walk_expr(step, f);
+            }
+        }
     }
 }
 
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
+/// Recursively walk a Python statement AST.
+pub fn walk_stmt(
+    stmt: &ast::Stmt,
+    f: &mut impl FnMut(&ast::Stmt),
+    fe: &mut impl FnMut(&ast::Expr),
+) {
+    f(stmt);
+    match stmt {
+        ast::Stmt::FunctionDef(func) => {
+            for deco in &func.decorator_list {
+                walk_expr(deco, fe);
+            }
+            for arg in func
+                .args
+                .posonlyargs
+                .iter()
+                .chain(func.args.args.iter())
+                .chain(func.args.kwonlyargs.iter())
+            {
+                if let Some(ann) = &arg.def.annotation {
+                    walk_expr(ann, fe);
+                }
+            }
+            if let Some(ret) = &func.returns {
+                walk_expr(ret, fe);
+            }
+            for child in &func.body {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::AsyncFunctionDef(func) => {
+            for deco in &func.decorator_list {
+                walk_expr(deco, fe);
+            }
+            for arg in func
+                .args
+                .posonlyargs
+                .iter()
+                .chain(func.args.args.iter())
+                .chain(func.args.kwonlyargs.iter())
+            {
+                if let Some(ann) = &arg.def.annotation {
+                    walk_expr(ann, fe);
+                }
+            }
+            if let Some(ret) = &func.returns {
+                walk_expr(ret, fe);
+            }
+            for child in &func.body {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::ClassDef(c) => {
+            for deco in &c.decorator_list {
+                walk_expr(deco, fe);
+            }
+            for base in &c.bases {
+                walk_expr(base, fe);
+            }
+            for kw in &c.keywords {
+                walk_expr(&kw.value, fe);
+            }
+            for child in &c.body {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::Return(r) => {
+            if let Some(value) = &r.value {
+                walk_expr(value, fe);
+            }
+        }
+        ast::Stmt::Delete(d) => {
+            for target in &d.targets {
+                walk_expr(target, fe);
+            }
+        }
+        ast::Stmt::Assign(a) => {
+            for target in &a.targets {
+                walk_expr(target, fe);
+            }
+            walk_expr(&a.value, fe);
+        }
+        ast::Stmt::AugAssign(a) => {
+            walk_expr(&a.target, fe);
+            walk_expr(&a.value, fe);
+        }
+        ast::Stmt::AnnAssign(a) => {
+            walk_expr(&a.target, fe);
+            walk_expr(&a.annotation, fe);
+            if let Some(value) = &a.value {
+                walk_expr(value, fe);
+            }
+        }
+        ast::Stmt::For(f_loop) => {
+            walk_expr(&f_loop.target, fe);
+            walk_expr(&f_loop.iter, fe);
+            for child in &f_loop.body {
+                walk_stmt(child, f, fe);
+            }
+            for child in &f_loop.orelse {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::AsyncFor(f_loop) => {
+            walk_expr(&f_loop.target, fe);
+            walk_expr(&f_loop.iter, fe);
+            for child in &f_loop.body {
+                walk_stmt(child, f, fe);
+            }
+            for child in &f_loop.orelse {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::While(w_loop) => {
+            walk_expr(&w_loop.test, fe);
+            for child in &w_loop.body {
+                walk_stmt(child, f, fe);
+            }
+            for child in &w_loop.orelse {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::If(if_stmt) => {
+            walk_expr(&if_stmt.test, fe);
+            for child in &if_stmt.body {
+                walk_stmt(child, f, fe);
+            }
+            for child in &if_stmt.orelse {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::With(w) => {
+            for item in &w.items {
+                walk_expr(&item.context_expr, fe);
+                if let Some(target) = &item.optional_vars {
+                    walk_expr(target, fe);
+                }
+            }
+            for child in &w.body {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::AsyncWith(w) => {
+            for item in &w.items {
+                walk_expr(&item.context_expr, fe);
+                if let Some(target) = &item.optional_vars {
+                    walk_expr(target, fe);
+                }
+            }
+            for child in &w.body {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::Match(m) => {
+            walk_expr(&m.subject, fe);
+            for case in &m.cases {
+                if let Some(guard) = &case.guard {
+                    walk_expr(guard, fe);
+                }
+                for child in &case.body {
+                    walk_stmt(child, f, fe);
+                }
+            }
+        }
+        ast::Stmt::Raise(r) => {
+            if let Some(exc) = &r.exc {
+                walk_expr(exc, fe);
+            }
+            if let Some(cause) = &r.cause {
+                walk_expr(cause, fe);
+            }
+        }
+        ast::Stmt::Try(t) => {
+            for child in &t.body {
+                walk_stmt(child, f, fe);
+            }
+            for handler in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                if let Some(type_expr) = &h.type_ {
+                    walk_expr(type_expr, fe);
+                }
+                for child in &h.body {
+                    walk_stmt(child, f, fe);
+                }
+            }
+            for child in &t.orelse {
+                walk_stmt(child, f, fe);
+            }
+            for child in &t.finalbody {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::TryStar(t) => {
+            for child in &t.body {
+                walk_stmt(child, f, fe);
+            }
+            for handler in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                if let Some(type_expr) = &h.type_ {
+                    walk_expr(type_expr, fe);
+                }
+                for child in &h.body {
+                    walk_stmt(child, f, fe);
+                }
+            }
+            for child in &t.orelse {
+                walk_stmt(child, f, fe);
+            }
+            for child in &t.finalbody {
+                walk_stmt(child, f, fe);
+            }
+        }
+        ast::Stmt::Assert(a) => {
+            walk_expr(&a.test, fe);
+            if let Some(msg) = &a.msg {
+                walk_expr(msg, fe);
+            }
+        }
+        ast::Stmt::Expr(e) => {
+            walk_expr(&e.value, fe);
+        }
+        ast::Stmt::Import(_)
+        | ast::Stmt::ImportFrom(_)
+        | ast::Stmt::Global(_)
+        | ast::Stmt::Nonlocal(_)
+        | ast::Stmt::Pass(_)
+        | ast::Stmt::Break(_)
+        | ast::Stmt::Continue(_) => {}
+        ast::Stmt::TypeAlias(t) => {
+            walk_expr(&t.name, fe);
+            walk_expr(&t.value, fe);
+        }
+    }
+}
+
+/// Checks if an expression contains a lambda.
+pub fn contains_lambda(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if matches!(e, ast::Expr::Lambda(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Checks if an expression contains exec/eval.
+pub fn contains_exec_eval(expr: &ast::Expr) -> bool {
+    let mut found = false;
+    walk_expr(expr, &mut |e| {
+        if let ast::Expr::Call(c) = e {
             if let ast::Expr::Name(n) = c.func.as_ref() {
                 if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
-                    return true;
+                    found = true;
                 }
             }
-            c.args.iter().any(contains_exec_eval)
-                || c.keywords.iter().any(|k| contains_exec_eval(&k.value))
         }
-        _ => false,
-    }
+    });
+    found
 }
 
 /// Placeholder for class emission — always a hard gap at dispatch layer.
@@ -341,8 +740,7 @@ pub fn class_gap_reason(class: &ast::StmtClassDef) -> GapReason {
             .unwrap_or(false)
     });
     let mut reason = format!(
-        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)"
-        ,
+        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)",
         class.name
     );
     if meta {
