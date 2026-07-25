@@ -250,80 +250,398 @@ fn constant_to_rust(c: &ast::Constant) -> Option<String> {
 
 fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReason>) {
     for stmt in body {
-        match stmt {
-            ast::Stmt::Try(_) | ast::Stmt::TryStar(_) | ast::Stmt::Raise(_) => {
-                out.push(GapReason::new(
-                    Category::Exception,
-                    format!(
-                        "exception handling inside `{fname}` not lowered (README Exception)"
-                    ),
-                ));
+        walk_stmt(stmt, fname, out);
+    }
+}
+
+fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
+    match stmt {
+        ast::Stmt::FunctionDef(f) => {
+            out.push(GapReason::new(
+                Category::Other,
+                format!("nested function `{}` inside `{fname}` not lowered in this phase", f.name),
+            ));
+            for s in &f.body {
+                walk_stmt(s, fname, out);
             }
-            ast::Stmt::Expr(e) => {
-                if contains_lambda(&e.value) {
-                    out.push(GapReason::new(
-                        Category::Lambda,
-                        format!("lambda inside `{fname}` not lowered"),
-                    ));
+        }
+        ast::Stmt::AsyncFunctionDef(f) => {
+            out.push(GapReason::new(
+                Category::Other,
+                format!("nested async function `{}` inside `{fname}` not lowered in this phase", f.name),
+            ));
+            for s in &f.body {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::ClassDef(c) => {
+            out.push(GapReason::new(
+                Category::Class,
+                format!("nested class `{}` inside `{fname}` not lowered (README Class)", c.name),
+            ));
+            for s in &c.body {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::Return(r) => {
+            if let Some(value) = &r.value {
+                walk_expr(value, fname, out);
+            }
+        }
+        ast::Stmt::Delete(d) => {
+            for target in &d.targets {
+                walk_expr(target, fname, out);
+            }
+        }
+        ast::Stmt::Assign(a) => {
+            for target in &a.targets {
+                walk_expr(target, fname, out);
+            }
+            walk_expr(&a.value, fname, out);
+        }
+        ast::Stmt::AugAssign(a) => {
+            walk_expr(&a.target, fname, out);
+            walk_expr(&a.value, fname, out);
+        }
+        ast::Stmt::AnnAssign(a) => {
+            walk_expr(&a.target, fname, out);
+            walk_expr(&a.annotation, fname, out);
+            if let Some(value) = &a.value {
+                walk_expr(value, fname, out);
+            }
+        }
+        ast::Stmt::For(f) => {
+            walk_expr(&f.target, fname, out);
+            walk_expr(&f.iter, fname, out);
+            for s in &f.body {
+                walk_stmt(s, fname, out);
+            }
+            for s in &f.orelse {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::AsyncFor(f) => {
+            walk_expr(&f.target, fname, out);
+            walk_expr(&f.iter, fname, out);
+            for s in &f.body {
+                walk_stmt(s, fname, out);
+            }
+            for s in &f.orelse {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::While(w) => {
+            walk_expr(&w.test, fname, out);
+            for s in &w.body {
+                walk_stmt(s, fname, out);
+            }
+            for s in &w.orelse {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::If(i) => {
+            walk_expr(&i.test, fname, out);
+            for s in &i.body {
+                walk_stmt(s, fname, out);
+            }
+            for s in &i.orelse {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::With(w) => {
+            for item in &w.items {
+                walk_expr(&item.context_expr, fname, out);
+                if let Some(optional_vars) = &item.optional_vars {
+                    walk_expr(optional_vars, fname, out);
                 }
-                if contains_exec_eval(&e.value) {
-                    out.push(GapReason::new(
-                        Category::Metaprogramming,
-                        format!("exec/eval inside `{fname}` not lowered (README Metaprogramming)"),
-                    ));
+            }
+            for s in &w.body {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::AsyncWith(w) => {
+            for item in &w.items {
+                walk_expr(&item.context_expr, fname, out);
+                if let Some(optional_vars) = &item.optional_vars {
+                    walk_expr(optional_vars, fname, out);
                 }
             }
-            ast::Stmt::FunctionDef(_) | ast::Stmt::AsyncFunctionDef(_) => {
-                out.push(GapReason::new(
-                    Category::Other,
-                    format!("nested function inside `{fname}` not lowered in this phase"),
-                ));
+            for s in &w.body {
+                walk_stmt(s, fname, out);
             }
-            ast::Stmt::ClassDef(c) => {
-                out.push(GapReason::new(
-                    Category::Class,
-                    format!(
-                        "nested class `{}` inside `{fname}` not lowered (README Class)",
-                        c.name
-                    ),
-                ));
+        }
+        ast::Stmt::Match(m) => {
+            walk_expr(&m.subject, fname, out);
+            for case in &m.cases {
+                if let Some(guard) = &case.guard {
+                    walk_expr(guard, fname, out);
+                }
+                for s in &case.body {
+                    walk_stmt(s, fname, out);
+                }
             }
-            _ => {}
+        }
+        ast::Stmt::Raise(r) => {
+            out.push(GapReason::new(
+                Category::Exception,
+                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+            ));
+            if let Some(exc) = &r.exc {
+                walk_expr(exc, fname, out);
+            }
+            if let Some(cause) = &r.cause {
+                walk_expr(cause, fname, out);
+            }
+        }
+        ast::Stmt::Try(t) => {
+            out.push(GapReason::new(
+                Category::Exception,
+                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+            ));
+            for s in &t.body {
+                walk_stmt(s, fname, out);
+            }
+            for handler in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                if let Some(type_) = &h.type_ {
+                    walk_expr(type_, fname, out);
+                }
+                for s in &h.body {
+                    walk_stmt(s, fname, out);
+                }
+            }
+            for s in &t.orelse {
+                walk_stmt(s, fname, out);
+            }
+            for s in &t.finalbody {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::TryStar(t) => {
+            out.push(GapReason::new(
+                Category::Exception,
+                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+            ));
+            for s in &t.body {
+                walk_stmt(s, fname, out);
+            }
+            for handler in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                if let Some(type_) = &h.type_ {
+                    walk_expr(type_, fname, out);
+                }
+                for s in &h.body {
+                    walk_stmt(s, fname, out);
+                }
+            }
+            for s in &t.orelse {
+                walk_stmt(s, fname, out);
+            }
+            for s in &t.finalbody {
+                walk_stmt(s, fname, out);
+            }
+        }
+        ast::Stmt::Assert(a) => {
+            walk_expr(&a.test, fname, out);
+            if let Some(msg) = &a.msg {
+                walk_expr(msg, fname, out);
+            }
+        }
+        ast::Stmt::Import(i) => {
+            let names: Vec<_> = i.names.iter().map(|a| a.name.to_string()).collect();
+            out.push(GapReason::new(
+                Category::Import,
+                format!(
+                    "nested import {} inside `{fname}` not lowered — unresolved / unmapped import (flag not guess)",
+                    names.join(", ")
+                ),
+            ));
+        }
+        ast::Stmt::ImportFrom(i) => {
+            let mod_name = i
+                .module
+                .as_ref()
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| ".".into());
+            out.push(GapReason::new(
+                Category::Import,
+                format!(
+                    "nested from {mod_name} import … inside `{fname}` not lowered — unresolved / unmapped import"
+                ),
+            ));
+        }
+        ast::Stmt::Global(_) | ast::Stmt::Nonlocal(_) | ast::Stmt::Pass(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {}
+        ast::Stmt::Expr(e) => {
+            walk_expr(&e.value, fname, out);
+        }
+        ast::Stmt::TypeAlias(t) => {
+            walk_expr(&t.value, fname, out);
         }
     }
 }
 
-fn contains_lambda(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
+fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
+    if let ast::Expr::Lambda(l) = expr {
+        out.push(GapReason::new(
+            Category::Lambda,
+            format!("lambda inside `{fname}` not lowered"),
+        ));
+        walk_expr(&l.body, fname, out);
+        return;
+    }
+
+    if let ast::Expr::Call(c) = expr {
+        if let ast::Expr::Name(n) = c.func.as_ref() {
+            if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
+                out.push(GapReason::new(
+                    Category::Metaprogramming,
+                    format!("exec/eval inside `{fname}` not lowered (README Metaprogramming)"),
+                ));
+            }
         }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::UnaryOp(u) => contains_lambda(&u.operand),
+    }
+
+    match expr {
+        ast::Expr::BoolOp(b) => {
+            for val in &b.values {
+                walk_expr(val, fname, out);
+            }
+        }
+        ast::Expr::NamedExpr(n) => {
+            walk_expr(&n.target, fname, out);
+            walk_expr(&n.value, fname, out);
+        }
+        ast::Expr::BinOp(b) => {
+            walk_expr(&b.left, fname, out);
+            walk_expr(&b.right, fname, out);
+        }
+        ast::Expr::UnaryOp(u) => {
+            walk_expr(&u.operand, fname, out);
+        }
+        ast::Expr::Lambda(_) => unreachable!(),
         ast::Expr::IfExp(i) => {
-            contains_lambda(&i.test) || contains_lambda(&i.body) || contains_lambda(&i.orelse)
+            walk_expr(&i.test, fname, out);
+            walk_expr(&i.body, fname, out);
+            walk_expr(&i.orelse, fname, out);
         }
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        _ => false,
+        ast::Expr::Dict(d) => {
+            for key in &d.keys {
+                if let Some(k) = key {
+                    walk_expr(k, fname, out);
+                }
+            }
+            for val in &d.values {
+                walk_expr(val, fname, out);
+            }
+        }
+        ast::Expr::Set(s) => {
+            for elt in &s.elts {
+                walk_expr(elt, fname, out);
+            }
+        }
+        ast::Expr::ListComp(lc) => {
+            walk_expr(&lc.elt, fname, out);
+            for gen in &lc.generators {
+                walk_comprehension(gen, fname, out);
+            }
+        }
+        ast::Expr::SetComp(sc) => {
+            walk_expr(&sc.elt, fname, out);
+            for gen in &sc.generators {
+                walk_comprehension(gen, fname, out);
+            }
+        }
+        ast::Expr::DictComp(dc) => {
+            walk_expr(&dc.key, fname, out);
+            walk_expr(&dc.value, fname, out);
+            for gen in &dc.generators {
+                walk_comprehension(gen, fname, out);
+            }
+        }
+        ast::Expr::GeneratorExp(ge) => {
+            walk_expr(&ge.elt, fname, out);
+            for gen in &ge.generators {
+                walk_comprehension(gen, fname, out);
+            }
+        }
+        ast::Expr::Await(a) => {
+            walk_expr(&a.value, fname, out);
+        }
+        ast::Expr::Yield(y) => {
+            if let Some(val) = &y.value {
+                walk_expr(val, fname, out);
+            }
+        }
+        ast::Expr::YieldFrom(y) => {
+            walk_expr(&y.value, fname, out);
+        }
+        ast::Expr::Compare(c) => {
+            walk_expr(&c.left, fname, out);
+            for comparator in &c.comparators {
+                walk_expr(comparator, fname, out);
+            }
+        }
+        ast::Expr::Call(c) => {
+            walk_expr(&c.func, fname, out);
+            for arg in &c.args {
+                walk_expr(arg, fname, out);
+            }
+            for kw in &c.keywords {
+                walk_expr(&kw.value, fname, out);
+            }
+        }
+        ast::Expr::FormattedValue(f) => {
+            walk_expr(&f.value, fname, out);
+            if let Some(spec) = &f.format_spec {
+                walk_expr(spec, fname, out);
+            }
+        }
+        ast::Expr::JoinedStr(j) => {
+            for val in &j.values {
+                walk_expr(val, fname, out);
+            }
+        }
+        ast::Expr::Constant(_) => {}
+        ast::Expr::Attribute(a) => {
+            walk_expr(&a.value, fname, out);
+        }
+        ast::Expr::Subscript(s) => {
+            walk_expr(&s.value, fname, out);
+            walk_expr(&s.slice, fname, out);
+        }
+        ast::Expr::Starred(s) => {
+            walk_expr(&s.value, fname, out);
+        }
+        ast::Expr::Name(_) => {}
+        ast::Expr::List(l) => {
+            for elt in &l.elts {
+                walk_expr(elt, fname, out);
+            }
+        }
+        ast::Expr::Tuple(t) => {
+            for elt in &t.elts {
+                walk_expr(elt, fname, out);
+            }
+        }
+        ast::Expr::Slice(s) => {
+            if let Some(lower) = &s.lower {
+                walk_expr(lower, fname, out);
+            }
+            if let Some(upper) = &s.upper {
+                walk_expr(upper, fname, out);
+            }
+            if let Some(step) = &s.step {
+                walk_expr(step, fname, out);
+            }
+        }
     }
 }
 
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
-            if let ast::Expr::Name(n) = c.func.as_ref() {
-                if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
-                    return true;
-                }
-            }
-            c.args.iter().any(contains_exec_eval)
-                || c.keywords.iter().any(|k| contains_exec_eval(&k.value))
-        }
-        _ => false,
+fn walk_comprehension(gen: &ast::Comprehension, fname: &str, out: &mut Vec<GapReason>) {
+    walk_expr(&gen.target, fname, out);
+    walk_expr(&gen.iter, fname, out);
+    for cond in &gen.ifs {
+        walk_expr(cond, fname, out);
     }
 }
 

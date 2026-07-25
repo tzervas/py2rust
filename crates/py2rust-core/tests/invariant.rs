@@ -85,6 +85,28 @@ fn simple_fn_emits_typed_functions() {
 }
 
 #[test]
+fn nested_constructs_deeply_scanned_recursively() {
+    // We should correctly scan deep inside If, For, etc. inside a function body.
+    let src = r#"
+def my_complex_fn(x: int) -> int:
+    if x > 10:
+        for i in range(x):
+            try:
+                print(lambda: i)
+                exec("y = 1")
+            except Exception:
+                pass
+    return x
+"#;
+    let (report, _rust) = transpile_source(src, "nested.py", None).unwrap();
+    let categories: BTreeSet<_> = report.gaps.iter().map(|g| g.category).collect();
+
+    assert!(categories.contains(&Category::Exception), "Expected Exception gap: {:?}", report.gaps);
+    assert!(categories.contains(&Category::Lambda), "Expected Lambda gap: {:?}", report.gaps);
+    assert!(categories.contains(&Category::Metaprogramming), "Expected Metaprogramming gap: {:?}", report.gaps);
+}
+
+#[test]
 fn class_only_produces_class_gaps() {
     let (label, source) = fixture("class_only.py");
     let report = analyze_source(&source, &label).unwrap();
