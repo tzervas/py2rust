@@ -58,7 +58,9 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             Some(ann) if is_any_annotation(ann) => {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!("parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"),
+                    format!(
+                        "parameter `{aname}` of `{name}` annotated Any — dynamic typing (README)"
+                    ),
                 ));
                 "/* Any */ i32".to_string()
             }
@@ -91,9 +93,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
             if !is_pass_only_body(&func.body) {
                 sub_gaps.push(GapReason::new(
                     Category::DynamicTyping,
-                    format!(
-                        "function `{name}` has no return annotation — dynamic typing (README)"
-                    ),
+                    format!("function `{name}` has no return annotation — dynamic typing (README)"),
                 ));
             }
             ("i32".to_string(), false)
@@ -127,9 +127,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         None => {
             sub_gaps.push(GapReason::new(
                 Category::FunctionBody,
-                format!(
-                    "function body of `{name}` not lowered — flag not guess (no silent TODO)"
-                ),
+                format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
             if ret_is_unit {
                 "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
@@ -259,7 +257,10 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::FunctionDef(f) => {
             out.push(GapReason::new(
                 Category::Other,
-                format!("nested function `{}` inside `{fname}` not lowered in this phase", f.name),
+                format!(
+                    "nested function `{}` inside `{fname}` not lowered in this phase",
+                    f.name
+                ),
             ));
             for s in &f.body {
                 walk_stmt(s, fname, out);
@@ -268,7 +269,10 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::AsyncFunctionDef(f) => {
             out.push(GapReason::new(
                 Category::Other,
-                format!("nested async function `{}` inside `{fname}` not lowered in this phase", f.name),
+                format!(
+                    "nested async function `{}` inside `{fname}` not lowered in this phase",
+                    f.name
+                ),
             ));
             for s in &f.body {
                 walk_stmt(s, fname, out);
@@ -277,7 +281,10 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::ClassDef(c) => {
             out.push(GapReason::new(
                 Category::Class,
-                format!("nested class `{}` inside `{fname}` not lowered (README Class)", c.name),
+                format!(
+                    "nested class `{}` inside `{fname}` not lowered (README Class)",
+                    c.name
+                ),
             ));
             for s in &c.body {
                 walk_stmt(s, fname, out);
@@ -470,7 +477,11 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
                 ),
             ));
         }
-        ast::Stmt::Global(_) | ast::Stmt::Nonlocal(_) | ast::Stmt::Pass(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {}
+        ast::Stmt::Global(_)
+        | ast::Stmt::Nonlocal(_)
+        | ast::Stmt::Pass(_)
+        | ast::Stmt::Break(_)
+        | ast::Stmt::Continue(_) => {}
         ast::Stmt::Expr(e) => {
             walk_expr(&e.value, fname, out);
         }
@@ -659,8 +670,7 @@ pub fn class_gap_reason(class: &ast::StmtClassDef) -> GapReason {
             .unwrap_or(false)
     });
     let mut reason = format!(
-        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)"
-        ,
+        "class `{}` ({bases}) not lowered to Rust struct/impl — classes and inheritance (README)",
         class.name
     );
     if meta {

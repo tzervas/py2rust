@@ -101,9 +101,21 @@ def my_complex_fn(x: int) -> int:
     let (report, _rust) = transpile_source(src, "nested.py", None).unwrap();
     let categories: BTreeSet<_> = report.gaps.iter().map(|g| g.category).collect();
 
-    assert!(categories.contains(&Category::Exception), "Expected Exception gap: {:?}", report.gaps);
-    assert!(categories.contains(&Category::Lambda), "Expected Lambda gap: {:?}", report.gaps);
-    assert!(categories.contains(&Category::Metaprogramming), "Expected Metaprogramming gap: {:?}", report.gaps);
+    assert!(
+        categories.contains(&Category::Exception),
+        "Expected Exception gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        categories.contains(&Category::Lambda),
+        "Expected Lambda gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        categories.contains(&Category::Metaprogramming),
+        "Expected Metaprogramming gap: {:?}",
+        report.gaps
+    );
 }
 
 #[test]

@@ -100,13 +100,7 @@ pub fn transpile_source(
                 item_name,
             } => {
                 report.gaps.push(Gap::new(
-                    file_label,
-                    line,
-                    col,
-                    category,
-                    snip,
-                    reason,
-                    item_name,
+                    file_label, line, col, category, snip, reason, item_name,
                 ));
             }
         }
