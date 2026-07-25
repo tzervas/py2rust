@@ -3,7 +3,16 @@
 //! Shape ported from `research/mycelium-transpile-snapshot/src/gap.rs`, with
 //! **Python-specific** categories. Every construct the driver cannot (or will not)
 //! lower is recorded here — never dropped silently.
+//!
+//! # Python → Mycelium bridge
+//!
+//! [`Category`] stays the driver's gap taxonomy. The pre-planned mapping
+//! alphabet [`crate::interface::PyConstruct`] mirrors it 1:1 (with
+//! `FunctionBody` ↔ `PartialEmit`). Conversions live here so the gap layer
+//! cannot fork from the map interface (gap-closer lane only).
 
+use crate::interface::{MapOutcome, PyConstruct};
+use crate::myc_map;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +86,77 @@ impl std::fmt::Display for Category {
     }
 }
 
+/// Bridge: gap [`Category`] → mapping-alphabet [`PyConstruct`].
+///
+/// `FunctionBody` (partial emit sub-gap) maps to [`PyConstruct::PartialEmit`].
+/// `Other` maps to [`PyConstruct::Other`] with an empty label; callers that have
+/// a free-text reason should use [`Category::to_py_construct_with_label`].
+impl From<Category> for PyConstruct {
+    fn from(c: Category) -> Self {
+        c.to_py_construct_with_label(None)
+    }
+}
+
+impl Category {
+    /// Convert to [`PyConstruct`], optionally attaching a free-text label for
+    /// [`Category::Other`] / open-ended reasons.
+    pub fn to_py_construct_with_label(self, other_label: Option<&str>) -> PyConstruct {
+        match self {
+            Category::Class => PyConstruct::Class,
+            Category::Exception => PyConstruct::Exception,
+            Category::DynamicTyping => PyConstruct::DynamicTyping,
+            Category::Metaprogramming => PyConstruct::Metaprogramming,
+            Category::Async => PyConstruct::Async,
+            Category::Import => PyConstruct::Import,
+            Category::Lambda => PyConstruct::Lambda,
+            Category::Comprehension => PyConstruct::Comprehension,
+            Category::MultiStmtBody => PyConstruct::MultiStmtBody,
+            // Partial-emit sub-gap: signature out, body not fully lowered.
+            Category::FunctionBody => PyConstruct::PartialEmit,
+            Category::Other => PyConstruct::Other(
+                other_label.unwrap_or("").to_string(),
+            ),
+        }
+    }
+
+    /// Look up the Mycelium-native [`MapOutcome`] for this gap category.
+    ///
+    /// Total: always Mapped or Unmappable (via [`myc_map::map_construct`]).
+    pub fn myc_map_outcome(self) -> MapOutcome {
+        let construct = PyConstruct::from(self);
+        myc_map::map_construct(&construct)
+    }
+}
+
+/// Bridge: [`PyConstruct`] → gap [`Category`].
+///
+/// [`PyConstruct::PartialEmit`] → [`Category::FunctionBody`].
+/// [`PyConstruct::Other(_)`] → [`Category::Other`] (label is not stored on
+/// `Category`; keep it on the gap `reason` / construct payload).
+impl From<&PyConstruct> for Category {
+    fn from(c: &PyConstruct) -> Self {
+        match c {
+            PyConstruct::Class => Category::Class,
+            PyConstruct::Exception => Category::Exception,
+            PyConstruct::DynamicTyping => Category::DynamicTyping,
+            PyConstruct::Metaprogramming => Category::Metaprogramming,
+            PyConstruct::Async => Category::Async,
+            PyConstruct::Import => Category::Import,
+            PyConstruct::Lambda => Category::Lambda,
+            PyConstruct::Comprehension => Category::Comprehension,
+            PyConstruct::MultiStmtBody => Category::MultiStmtBody,
+            PyConstruct::PartialEmit => Category::FunctionBody,
+            PyConstruct::Other(_) => Category::Other,
+        }
+    }
+}
+
+impl From<PyConstruct> for Category {
+    fn from(c: PyConstruct) -> Self {
+        Category::from(&c)
+    }
+}
+
 /// One construct this transpiler could not (or would not) fully lower to Rust.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Gap {
@@ -112,6 +192,23 @@ impl Gap {
             reason: reason.into(),
             item_name,
         }
+    }
+
+    /// The mapping-alphabet construct for this gap (aligned with
+    /// [`Gap::category`] / [`Gap::python_construct`]).
+    pub fn py_construct(&self) -> PyConstruct {
+        // Prefer gap reason as Other label when category is Other.
+        let label = if self.category == Category::Other {
+            Some(self.reason.as_str())
+        } else {
+            None
+        };
+        self.category.to_py_construct_with_label(label)
+    }
+
+    /// Mycelium-native map outcome for this gap's construct.
+    pub fn myc_map_outcome(&self) -> MapOutcome {
+        myc_map::map_construct(&self.py_construct())
     }
 }
 

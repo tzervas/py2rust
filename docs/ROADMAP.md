@@ -19,6 +19,13 @@ Tero-ready (docs/tero-index) and hygiene (scripts/check.sh) added per plan.md pr
 - Expand conversion rules + tests
 - CI parity
 
+### Wave M — Python → Mycelium-native map (gap closure scaffolding)
+- Stable contract: `PyConstruct` / `MycForm` / `Guarantee` / `Citation` / `MapOutcome`
+- Total taxonomy table in `myc_map` (Mapped or Unmappable-with-reason; citations or Unverified)
+- Bridge `gap::Category` ↔ `PyConstruct` (`FunctionBody` ↔ `PartialEmit`)
+- Docs: [`PY2MYC_MAP.md`](PY2MYC_MAP.md) — does **not** touch mycelium-l1 grammar
+- Next (out of scope here): driver emit path to `.myc` using the map; optional `myc check` vet
+
 See workspace plan.md §4 for context. Cross-cite wsfull-wave-2026-07-09-compact.md .
 
 Tero cite after: "py2rust hygiene"

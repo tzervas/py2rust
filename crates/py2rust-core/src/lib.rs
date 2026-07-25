@@ -1,9 +1,14 @@
-//! `py2rust-core` — Python → Rust transpiler library.
+//! `py2rust-core` — Python → Rust transpiler library, plus a **Python →
+//! Mycelium-native** mapping layer that does not require an interim Rust route.
 //!
 //! Pipeline: Python source → parse (`rustpython-parser`) → never-silent
 //! [`dispatch`] over `Module.body` → best-effort Rust emission + structured
 //! [`.gap.json`](gap::GapReport) (G2 / VR-5 honesty patterns ported from the
 //! mycelium-transpile research snapshot; **not** a Mycelium dependency).
+//!
+//! The Mycelium mapping surface lives in [`interface`] + [`myc_map`]: every
+//! [`gap::Category`] / [`interface::PyConstruct`] is either Mapped to a
+//! Mycelium spelling or explicitly Unmappable with reason (no silent drops).
 //!
 //! # Guarantee tags (VR-5)
 //!
@@ -11,12 +16,16 @@
 //! - Never-silent invariant (every top-level item is emitted, gapped, or both) is
 //!   checked over a fixed fixture corpus — **Empirical/Declared**, not Proven
 //!   (`Stmt` exhaustiveness rests on a catch-all arm).
+//! - Mycelium map rows use [`interface::Guarantee`] (Exact / Empirical / Refusal)
+//!   and always carry a [`interface::Citation`] (Corpus / Test / Unverified).
 
 pub mod batch;
 pub mod dispatch;
 pub mod emit;
 pub mod gap;
+pub mod interface;
 pub mod map;
+pub mod myc_map;
 pub mod parse;
 pub mod source_loc;
 
@@ -28,4 +37,8 @@ pub use dispatch::{
     Outcome,
 };
 pub use gap::{gap_json_path, Category, Gap, GapReason, GapReport, GAP_SCHEMA_VERSION};
+pub use interface::{
+    taxonomy_constructs, Citation, Guarantee, MapOutcome, MycForm, PyConstruct,
+};
+pub use myc_map::{honesty_violations, map_construct, map_taxonomy, taxonomy_coverage};
 pub use parse::{parse_file, parse_source, ParseFail, ParsedModule};
