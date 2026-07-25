@@ -3,7 +3,7 @@ name = "py2rust"
 version = "0.1.0"
 description = "Python to Rust transpiler and code conversion assistant"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "astor>=0.8.0",
     "click>=8.0.0",
@@ -37,7 +37,7 @@ target-version = ['py39']
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py311"
 exclude = [
     "crates/**",
     "research/**",
