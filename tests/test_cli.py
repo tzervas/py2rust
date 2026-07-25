@@ -19,13 +19,15 @@ def test_analyze_command():
     with runner.isolated_filesystem():
         # Create a simple Python file
         with open("test.py", "w") as f:
-            f.write("""
+            f.write(
+                """
 def hello():
     print("Hello, World!")
 
 class MyClass:
     pass
-""")
+"""
+            )
 
         result = runner.invoke(main, ["analyze", "test.py"])
         assert result.exit_code == 0
@@ -38,7 +40,8 @@ def test_transpile_with_type_annotations():
     runner = CliRunner()
     with runner.isolated_filesystem():
         with open("test.py", "w") as f:
-            f.write("""
+            f.write(
+                """
 def add(x: int, y: float) -> float:
     pass
 
@@ -47,7 +50,8 @@ def greet(name: str) -> None:
 
 def check(flag: bool) -> bool:
     pass
-""")
+"""
+            )
 
         result = runner.invoke(main, ["transpile", "test.py", "--output", "test.rs"])
         assert result.exit_code == 0
@@ -68,10 +72,12 @@ def test_transpile_without_annotations():
     runner = CliRunner()
     with runner.isolated_filesystem():
         with open("test.py", "w") as f:
-            f.write("""
+            f.write(
+                """
 def untyped_func(a, b):
     pass
-""")
+"""
+            )
 
         result = runner.invoke(main, ["transpile", "test.py", "--output", "test.rs"])
         assert result.exit_code == 0
@@ -89,9 +95,11 @@ def test_transpile_invalid_syntax():
     runner = CliRunner()
     with runner.isolated_filesystem():
         with open("test.py", "w") as f:
-            f.write("""
+            f.write(
+                """
 def invalid_syntax(
-""")
+"""
+            )
 
         result = runner.invoke(main, ["transpile", "test.py"])
         assert result.exit_code != 0
@@ -103,9 +111,11 @@ def test_analyze_invalid_syntax():
     runner = CliRunner()
     with runner.isolated_filesystem():
         with open("test.py", "w") as f:
-            f.write("""
+            f.write(
+                """
 def invalid_syntax(
-""")
+"""
+            )
 
         result = runner.invoke(main, ["analyze", "test.py"])
         assert result.exit_code != 0
