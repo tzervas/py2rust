@@ -3,6 +3,7 @@
 
 use crate::gap::{Category, GapReason};
 use crate::map::{is_any_annotation, map_type_expr};
+use crate::walk::{contains_exec_eval, contains_lambda};
 use rustpython_parser::ast::{self, Ranged};
 
 /// Result of attempting to emit a construct.
@@ -290,40 +291,6 @@ fn scan_body_for_sub_gaps(body: &[ast::Stmt], fname: &str, out: &mut Vec<GapReas
             }
             _ => {}
         }
-    }
-}
-
-fn contains_lambda(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Lambda(_) => true,
-        ast::Expr::Call(c) => {
-            contains_lambda(&c.func)
-                || c.args.iter().any(contains_lambda)
-                || c.keywords.iter().any(|k| contains_lambda(&k.value))
-        }
-        ast::Expr::BinOp(b) => contains_lambda(&b.left) || contains_lambda(&b.right),
-        ast::Expr::UnaryOp(u) => contains_lambda(&u.operand),
-        ast::Expr::IfExp(i) => {
-            contains_lambda(&i.test) || contains_lambda(&i.body) || contains_lambda(&i.orelse)
-        }
-        ast::Expr::List(l) => l.elts.iter().any(contains_lambda),
-        ast::Expr::Tuple(t) => t.elts.iter().any(contains_lambda),
-        _ => false,
-    }
-}
-
-fn contains_exec_eval(expr: &ast::Expr) -> bool {
-    match expr {
-        ast::Expr::Call(c) => {
-            if let ast::Expr::Name(n) = c.func.as_ref() {
-                if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
-                    return true;
-                }
-            }
-            c.args.iter().any(contains_exec_eval)
-                || c.keywords.iter().any(|k| contains_exec_eval(&k.value))
-        }
-        _ => false,
     }
 }
 

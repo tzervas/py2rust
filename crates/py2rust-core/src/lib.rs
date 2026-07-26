@@ -19,6 +19,7 @@ pub mod gap;
 pub mod map;
 pub mod parse;
 pub mod source_loc;
+pub mod walk;
 
 pub use batch::{
     discover_py_files, transpile_batch, BatchSummary, FileResult, UnionGapReport,

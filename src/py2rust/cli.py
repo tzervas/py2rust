@@ -86,6 +86,14 @@ def analyze(python_file):
         sys.exit(1)
 
 
+TYPE_MAPPING = {
+    "int": "i32",
+    "float": "f64",
+    "str": "&str",
+    "bool": "bool",
+}
+
+
 class PythonToRustTranspiler:
     """Transpiler for converting Python AST to Rust code."""
 
@@ -123,22 +131,10 @@ class PythonToRustTranspiler:
             return default
 
         if isinstance(node, ast.Name):
-            mapping = {
-                "int": "i32",
-                "float": "f64",
-                "str": "&str",
-                "bool": "bool",
-            }
-            return mapping.get(node.id, default)
+            return TYPE_MAPPING.get(node.id, default)
 
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            mapping = {
-                "int": "i32",
-                "float": "f64",
-                "str": "&str",
-                "bool": "bool",
-            }
-            return mapping.get(node.value, default)
+            return TYPE_MAPPING.get(node.value, default)
 
         return default
 
@@ -150,25 +146,13 @@ class PythonToRustTranspiler:
         if isinstance(returns_node, ast.Name):
             if returns_node.id == "None":
                 return None
-            mapping = {
-                "int": "i32",
-                "float": "f64",
-                "str": "&str",
-                "bool": "bool",
-            }
-            return mapping.get(returns_node.id, "i32")
+            return TYPE_MAPPING.get(returns_node.id, "i32")
 
         if isinstance(returns_node, ast.Constant):
             if returns_node.value is None or returns_node.value == "None":
                 return None
             if isinstance(returns_node.value, str):
-                mapping = {
-                    "int": "i32",
-                    "float": "f64",
-                    "str": "&str",
-                    "bool": "bool",
-                }
-                return mapping.get(returns_node.value, "i32")
+                return TYPE_MAPPING.get(returns_node.value, "i32")
 
         return "i32"
 
