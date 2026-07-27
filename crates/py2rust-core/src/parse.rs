@@ -98,10 +98,19 @@ pub fn stmt_line_col(source: &str, stmt: &ast::Stmt) -> (usize, usize) {
 
 /// Best-effort single-line snippet from source for a statement span.
 pub fn snippet_for(source: &str, stmt: &ast::Stmt) -> String {
-    let start = stmt.range().start().to_u32() as usize;
-    let end = stmt.range().end().to_u32() as usize;
-    let end = end.min(source.len());
-    let start = start.min(end);
+    let mut start = stmt.range().start().to_u32() as usize;
+    let mut end = stmt.range().end().to_u32() as usize;
+    end = end.min(source.len());
+    start = start.min(end);
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    while end < source.len() && !source.is_char_boundary(end) {
+        end += 1;
+    }
+    if start > end {
+        end = start;
+    }
     let slice = &source[start..end];
     let first = slice.lines().next().unwrap_or(slice).trim();
     if first.len() > 120 {
