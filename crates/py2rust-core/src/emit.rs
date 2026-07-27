@@ -2,7 +2,7 @@
 //! Partial emission always carries sub-gaps (never silent TODO bodies).
 
 use crate::gap::{Category, GapReason};
-use crate::map::{is_any_annotation, map_type_expr};
+use crate::map::{is_any_annotation, map_type_expr, rust_ident, IdentFix};
 use rustpython_parser::ast::{self, Ranged};
 
 /// Result of attempting to emit a construct.
@@ -23,6 +23,20 @@ pub struct Emitted {
 pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     let name = func.name.to_string();
     let mut sub_gaps = Vec::new();
+
+    // Rust-legal name. `name` stays the Python one — it is what the gap report
+    // and every human-facing message refer to.
+    let (rs_name, fix) = rust_ident(&name);
+    if matches!(fix, IdentFix::Renamed) {
+        sub_gaps.push(GapReason::new(
+            Category::Other,
+            format!(
+                "function `{name}` is a Rust keyword with no raw form; emitted as `{rs_name}`. \
+                 Callers still say `{name}` — renaming is the only legal lowering, so this is \
+                 flagged rather than fixed."
+            ),
+        ));
+    }
 
     // Decorators: dispatch usually gaps the whole item; if we still get here, record sub-gap.
     if !func.decorator_list.is_empty() {
@@ -77,7 +91,19 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
                 }
             },
         };
-        args_out.push(format!("{aname}: {ty}"));
+        // Parameters need the same escape as the function name: `def f(type)`
+        // and `def f(match)` are ordinary Python.
+        let (rs_aname, afix) = rust_ident(&aname);
+        if matches!(afix, IdentFix::Renamed) {
+            sub_gaps.push(GapReason::new(
+                Category::Other,
+                format!(
+                    "parameter `{aname}` of `{name}` is a Rust keyword with no raw form; \
+                     emitted as `{rs_aname}`"
+                ),
+            ));
+        }
+        args_out.push(format!("{rs_aname}: {ty}"));
     }
 
     if func.args.vararg.is_some() || func.args.kwarg.is_some() {
@@ -129,20 +155,23 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
                 Category::FunctionBody,
                 format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
-            if ret_is_unit {
-                "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
-            } else {
-                format!(
-                    "    // GAP: FunctionBody — body not lowered (flag not guess)\n    todo!(\"py2rust: body of `{name}` not lowered\")\n"
-                )
-            }
+            // `todo!()` regardless of return type. A unit-returning function
+            // used to get an empty body instead, which compiles *and returns
+            // normally* — so an unlowered body silently did nothing at runtime,
+            // which is the one thing this transpiler promises never to do. It
+            // also made the body indistinguishable from a lowered one to any
+            // check that scans the emitted text, which is how the L3 gate
+            // initially credited 11 modules of pure scaffolding as real ports.
+            format!(
+                "    // GAP: FunctionBody — body not lowered (flag not guess)\n    todo!(\"py2rust: body of `{name}` not lowered\")\n"
+            )
         }
     };
 
     let sig = if ret_is_unit {
-        format!("fn {name}({}) {{", args_out.join(", "))
+        format!("fn {rs_name}({}) {{", args_out.join(", "))
     } else {
-        format!("fn {name}({}) -> {ret_ty} {{", args_out.join(", "))
+        format!("fn {rs_name}({}) -> {ret_ty} {{", args_out.join(", "))
     };
 
     let mut rust = String::new();

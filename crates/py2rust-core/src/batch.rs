@@ -2,11 +2,25 @@
 //!
 //! Shape inspired by `research/mycelium-transpile-snapshot/src/batch.rs`.
 
+use crate::check::{CheckResult, Checker, L3Status, RustcDiag};
 use crate::dispatch;
 use crate::gap::{Gap, GapReport};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// Knobs for a batch run.
+///
+/// A struct rather than more positional parameters, because the next two gates
+/// (L4 behaviour, L5 clippy) belong here too and each would otherwise be another
+/// breaking signature change.
+#[derive(Debug, Clone, Default)]
+pub struct BatchOptions {
+    /// Run the L3 gate: hand every emitted `.rs` to `rustc` and record whether
+    /// it compiles. Off by default because it spawns a process per file; the
+    /// CLI turns it on, since an uncompiled emission is not an emission.
+    pub check_l3: bool,
+}
 
 /// Discover `*.py` files under `root` (sorted, skips `__pycache__` and `.venv`).
 pub fn discover_py_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -46,7 +60,26 @@ pub struct FileResult {
     pub total_statements: usize,
     /// L2 numerator: statements for which Rust was emitted.
     pub lowered_statements: usize,
+    /// L3: did `rustc` accept the emitted file? `NotRun` when the gate was off
+    /// or the toolchain was missing — never conflated with `Failed`.
+    pub l3_status: L3Status,
+    pub l3_not_run_reason: Option<String>,
+    pub l3_errors: Vec<RustcDiag>,
+    /// Unlowered bodies in the emitted file, by the larger of the two
+    /// measurements. A file of these compiles, so L3 pass alone says nothing
+    /// without this number beside it.
+    pub unlowered_bodies: usize,
     pub error: Option<String>,
+}
+
+impl FileResult {
+    fn with_check(mut self, c: CheckResult) -> Self {
+        self.l3_status = c.status;
+        self.unlowered_bodies = c.unlowered_bodies();
+        self.l3_not_run_reason = c.not_run_reason;
+        self.l3_errors = c.errors;
+        self
+    }
 }
 
 /// Aggregate batch summary.
@@ -60,6 +93,26 @@ pub struct BatchSummary {
     pub total_top_level: usize,
     pub total_statements: usize,
     pub lowered_statements: usize,
+    /// Files actually handed to `rustc` — those that emitted at least one item.
+    /// Zero means L3 was not measured, which is not the same as zero files
+    /// compiling, and the reports must not say so.
+    pub l3_checked: usize,
+    pub l3_passed: usize,
+    pub l3_failed: usize,
+    /// Passed **and** free of unlowered bodies. The honest L3 numerator.
+    pub l3_passed_without_stubs: usize,
+    /// Unlowered bodies across the corpus (max of the two measurements).
+    pub total_unlowered_bodies: usize,
+    /// The subset of those that actually left a `todo!()` in the emitted text.
+    pub total_stub_markers: usize,
+    /// Files where the two measurements disagreed. Non-zero means one of them is
+    /// missing something and the emitter deserves a look.
+    pub l3_measurement_disagreements: usize,
+    /// Error codes across the corpus, for ranking what to fix in the emitter.
+    /// Uncoded errors (parse errors) bucket under `"<uncoded>"`.
+    pub l3_error_codes: BTreeMap<String, usize>,
+    /// Why L3 produced no measurement, when it produced none.
+    pub l3_not_run_reason: Option<String>,
 }
 
 /// Union of all gaps across a batch (for backlog ranking).
@@ -89,12 +142,38 @@ impl UnionGapReport {
 }
 
 /// Transpile each `.py` under `root` into `out_dir`, writing `.rs` + `.gap.json`.
+///
+/// L3 off. See [`transpile_batch_with`].
 pub fn transpile_batch(
     root: &Path,
     out_dir: &Path,
 ) -> std::io::Result<(BatchSummary, UnionGapReport)> {
+    transpile_batch_with(root, out_dir, &BatchOptions::default())
+}
+
+/// Transpile each `.py` under `root` into `out_dir`, writing `.rs` + `.gap.json`,
+/// and optionally running the L3 compile gate over the result.
+///
+/// The toolchain is probed **once**, before the loop. A probe failure disables
+/// the gate for the whole run and is recorded as a reason on every file and on
+/// the summary — so the report can say "not measured, because X" rather than
+/// silently reporting that nothing compiled.
+pub fn transpile_batch_with(
+    root: &Path,
+    out_dir: &Path,
+    opts: &BatchOptions,
+) -> std::io::Result<(BatchSummary, UnionGapReport)> {
     std::fs::create_dir_all(out_dir)?;
     let files = discover_py_files(root)?;
+
+    let (checker, l3_off_reason) = if opts.check_l3 {
+        match Checker::probe() {
+            Ok(c) => (Some(c), None),
+            Err(why) => (None, Some(format!("toolchain unavailable: {why}"))),
+        }
+    } else {
+        (None, Some("L3 gate not requested for this run".to_string()))
+    };
     let mut file_results = Vec::new();
     let mut reports = Vec::new();
     let mut total_emitted = 0usize;
@@ -103,6 +182,14 @@ pub fn transpile_batch(
     let mut total_stmts = 0usize;
     let mut lowered_stmts = 0usize;
     let mut ok = 0usize;
+    let mut l3_checked = 0usize;
+    let mut l3_passed = 0usize;
+    let mut l3_failed = 0usize;
+    let mut l3_clean = 0usize;
+    let mut total_unlowered = 0usize;
+    let mut total_markers = 0usize;
+    let mut l3_disagreements = 0usize;
+    let mut l3_codes: BTreeMap<String, usize> = BTreeMap::new();
 
     for path in &files {
         let rel = path
@@ -124,24 +211,74 @@ pub fn transpile_batch(
             Ok((report, rust)) => {
                 std::fs::write(&rust_path, &rust)?;
                 report.write_json_file(&gap_path)?;
+                // A module that emitted nothing is not a module that compiles.
+                // Its `.rs` is a header comment, which rustc accepts, with no
+                // `todo!()` in it — so left in the denominator it would score a
+                // perfect "compiles, no stubs" for having produced no code at
+                // all. Excluded explicitly, with the reason recorded, rather
+                // than silently: an unmeasured file must never look measured.
+                let declared = report
+                    .gaps
+                    .iter()
+                    .filter(|g| g.category == crate::gap::Category::FunctionBody)
+                    .count();
+                let check = match (&checker, report.emitted_items.is_empty()) {
+                    (_, true) => CheckResult::not_run("nothing emitted — no Rust to compile", 0, 0),
+                    (Some(c), false) => c.check(&rust_path, declared),
+                    (None, false) => CheckResult::not_run(
+                        l3_off_reason.clone().unwrap_or_else(|| "L3 not run".into()),
+                        crate::check::count_stub_bodies(&rust_path),
+                        declared,
+                    ),
+                };
                 total_emitted += report.emitted_items.len();
                 total_gaps += report.real_gap_count();
                 total_top += report.total_top_level_items;
                 total_stmts += report.total_statements;
                 lowered_stmts += report.lowered_statement_count();
                 ok += 1;
-                file_results.push(FileResult {
-                    source: path.display().to_string(),
-                    rust_path: Some(rust_path.display().to_string()),
-                    gap_path: Some(gap_path.display().to_string()),
-                    emitted: report.emitted_items.len(),
-                    gaps: report.real_gap_count(),
-                    total_top_level: report.total_top_level_items,
-                    expressible_fraction: report.expressible_fraction(),
-                    total_statements: report.total_statements,
-                    lowered_statements: report.lowered_statement_count(),
-                    error: None,
-                });
+                match check.status {
+                    L3Status::Passed => {
+                        l3_checked += 1;
+                        l3_passed += 1;
+                        if check.compiles_without_stubs() {
+                            l3_clean += 1;
+                        }
+                    }
+                    L3Status::Failed => {
+                        l3_checked += 1;
+                        l3_failed += 1;
+                        for d in &check.errors {
+                            let key = d.code.clone().unwrap_or_else(|| "<uncoded>".to_string());
+                            *l3_codes.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                    L3Status::NotRun => {}
+                }
+                total_unlowered += check.unlowered_bodies();
+                total_markers += check.stub_markers;
+                if check.measurements_disagree() {
+                    l3_disagreements += 1;
+                }
+                file_results.push(
+                    FileResult {
+                        source: path.display().to_string(),
+                        rust_path: Some(rust_path.display().to_string()),
+                        gap_path: Some(gap_path.display().to_string()),
+                        emitted: report.emitted_items.len(),
+                        gaps: report.real_gap_count(),
+                        total_top_level: report.total_top_level_items,
+                        expressible_fraction: report.expressible_fraction(),
+                        total_statements: report.total_statements,
+                        lowered_statements: report.lowered_statement_count(),
+                        l3_status: L3Status::NotRun,
+                        l3_not_run_reason: None,
+                        l3_errors: Vec::new(),
+                        unlowered_bodies: 0,
+                        error: None,
+                    }
+                    .with_check(check),
+                );
                 reports.push(report);
             }
             Err(e) => {
@@ -155,6 +292,12 @@ pub fn transpile_batch(
                     expressible_fraction: 0.0,
                     total_statements: 0,
                     lowered_statements: 0,
+                    // Nothing was emitted, so there is nothing to compile. Not a
+                    // compile failure — the file never got that far.
+                    l3_status: L3Status::NotRun,
+                    l3_not_run_reason: Some("nothing emitted — file did not parse".into()),
+                    l3_errors: Vec::new(),
+                    unlowered_bodies: 0,
                     error: Some(e.to_string()),
                 });
             }
@@ -170,6 +313,15 @@ pub fn transpile_batch(
         total_top_level: total_top,
         total_statements: total_stmts,
         lowered_statements: lowered_stmts,
+        l3_checked,
+        l3_passed,
+        l3_failed,
+        l3_passed_without_stubs: l3_clean,
+        total_unlowered_bodies: total_unlowered,
+        total_stub_markers: total_markers,
+        l3_measurement_disagreements: l3_disagreements,
+        l3_error_codes: l3_codes,
+        l3_not_run_reason: if l3_checked == 0 { l3_off_reason } else { None },
     };
     let union = UnionGapReport::from_reports(&reports);
 
@@ -277,7 +429,60 @@ pub fn render_priority_report(
         let _ = writeln!(out);
     }
 
-    // 2. Signatures emitted, bodies not lowered — ranked by how much is behind them.
+    // 2. Emitted, but `rustc` rejects it. Ahead of signature-only work because
+    //    this is output that is actively wrong rather than merely incomplete:
+    //    every other number in the corpus report counts these modules as
+    //    successfully emitted.
+    let broken: Vec<&FileResult> = summary
+        .files
+        .iter()
+        .filter(|f| f.l3_status == L3Status::Failed)
+        .collect();
+    candidates += broken.len();
+    if shown < budget && !broken.is_empty() {
+        let _ = writeln!(out, "## Emitted but does not compile — fix next\n");
+        let _ = writeln!(
+            out,
+            "These count as emitted in every expressible/L2 figure, so coverage looks"
+        );
+        let _ = writeln!(
+            out,
+            "the same whether they build or not. They do not build.\n"
+        );
+        for f in broken.iter() {
+            if shown >= budget {
+                break;
+            }
+            let r = rel(&f.source);
+            let first = f
+                .l3_errors
+                .first()
+                .map(|d| {
+                    format!(
+                        "L{} {}{}",
+                        d.line,
+                        d.code
+                            .as_deref()
+                            .map(|c| format!("{c} "))
+                            .unwrap_or_default(),
+                        d.message
+                    )
+                })
+                .unwrap_or_else(|| "no diagnostic recorded".into());
+            let _ = writeln!(
+                out,
+                "- `{}` — id `l3:{}` — {} error(s); first: {}",
+                r,
+                stable_id(&r),
+                f.l3_errors.len(),
+                first
+            );
+            shown += 1;
+        }
+        let _ = writeln!(out);
+    }
+
+    // 3. Signatures emitted, bodies not lowered — ranked by how much is behind them.
     let mut sig_only: Vec<&FileResult> = summary
         .files
         .iter()
@@ -309,7 +514,7 @@ pub fn render_priority_report(
         let _ = writeln!(out);
     }
 
-    // 3. Category frequency — a proxy for leverage until the gap graph exists.
+    // 4. Category frequency — a proxy for leverage until the gap graph exists.
     let mut cats: Vec<(&str, usize)> = union
         .category_counts
         .iter()
@@ -337,7 +542,7 @@ pub fn render_priority_report(
         let _ = writeln!(out);
     }
 
-    // 4. What was left out. Never omitted.
+    // 5. What was left out. Never omitted.
     let _ = writeln!(out, "## Omitted\n");
     let omitted = candidates.saturating_sub(shown);
     let _ = writeln!(
@@ -355,6 +560,199 @@ pub fn render_priority_report(
     );
     let _ = writeln!(out, "correctness — see the corpus report for everything.");
 
+    out
+}
+
+/// The L3 headline: does the emitted Rust compile, and does compiling mean
+/// anything for this corpus.
+///
+/// Three states, never collapsed into two:
+///
+/// - **not measured** — the gate did not run. Rendered with the reason, because
+///   a missing toolchain shown as 0% passing is a manufactured regression.
+/// - **compiles** — `rustc` accepted it.
+/// - **compiles without stub bodies** — and it does something. This leads,
+///   because the emitter's unlowered-body fallback is `todo!()`, which compiles.
+///   A corpus of signatures scores 100% on the middle number and 0% on this one,
+///   and the middle number is the one that would get quoted.
+fn render_l3_block(summary: &BatchSummary) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    if summary.l3_checked == 0 {
+        let why = summary
+            .l3_not_run_reason
+            .as_deref()
+            .unwrap_or("no reason recorded");
+        let _ = writeln!(out, "- L3 compile gate: **not measured** ({why})");
+        let _ = writeln!(
+            out,
+            "\n> Not measured is not 0%. Nothing was handed to `rustc`, so this report"
+        );
+        let _ = writeln!(
+            out,
+            "> makes no claim either way about whether the emitted Rust builds."
+        );
+        return out;
+    }
+
+    let pct = |n: usize| n as f64 / summary.l3_checked as f64 * 100.0;
+    let _ = writeln!(
+        out,
+        "- L3 compiles: {:.1}% ({} of {} emitted modules accepted by `rustc`)",
+        pct(summary.l3_passed),
+        summary.l3_passed,
+        summary.l3_checked
+    );
+    let _ = writeln!(
+        out,
+        "- **L3 compiles with no stub body: {:.1}%** ({} of {} modules)",
+        pct(summary.l3_passed_without_stubs),
+        summary.l3_passed_without_stubs,
+        summary.l3_checked
+    );
+    let _ = writeln!(
+        out,
+        "- unlowered bodies across the corpus: {}\n",
+        summary.total_unlowered_bodies
+    );
+
+    // Two independent counts of the same quantity. When they diverge, one of
+    // them is blind, and the report should say which way rather than quietly
+    // publishing whichever it happened to use.
+    if summary.l3_measurement_disagreements > 0 {
+        let _ = writeln!(
+            out,
+            "> **{} module(s) disagree between the two unlowered-body measurements**",
+            summary.l3_measurement_disagreements
+        );
+        let _ = writeln!(
+            out,
+            "> ({} `todo!()` marker(s) in the emitted text vs {} `FunctionBody` gap(s)",
+            summary.total_stub_markers, summary.total_unlowered_bodies
+        );
+        let _ = writeln!(
+            out,
+            "> recorded). The larger count is used, so credit fails toward \"less\"."
+        );
+        let _ = writeln!(
+            out,
+            "> A divergence means the emitter is producing a body shape one of the"
+        );
+        let _ = writeln!(out, "> two cannot see; that is worth a look.\n");
+    }
+
+    if summary.l3_passed > 0 && summary.l3_passed_without_stubs == 0 {
+        let _ = writeln!(
+            out,
+            "> **Everything that compiles is a stub.** {} module(s) satisfy `rustc` and",
+            summary.l3_passed
+        );
+        let _ = writeln!(
+            out,
+            "> not one of them has a lowered body: the emitter's fallback for an"
+        );
+        let _ = writeln!(
+            out,
+            "> unlowered body is `todo!()`, which compiles and then panics. Read the"
+        );
+        let _ = writeln!(
+            out,
+            "> compile figure as \"the scaffolding is well-formed\", never as \"it works\"."
+        );
+    } else if summary.l3_passed > summary.l3_passed_without_stubs {
+        let stubbed = summary.l3_passed - summary.l3_passed_without_stubs;
+        let _ = writeln!(
+            out,
+            "> Note: {stubbed} of the {} compiling module(s) still contain `todo!()` bodies,",
+            summary.l3_passed
+        );
+        let _ = writeln!(
+            out,
+            "> so they build but panic when called. Only the second figure is progress."
+        );
+    }
+    out
+}
+
+/// The L3 detail: which modules failed, and which `rustc` errors dominate.
+///
+/// Error-code frequency is the emitter's own backlog — the L3 analogue of gap
+/// categories. `E0425` in bulk means unresolved names (imports not lowered);
+/// `E0308` in bulk means the type map is wrong. Those are different work.
+fn render_l3_section(rel: &dyn Fn(&str) -> String, summary: &BatchSummary) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "## L3 — emitted Rust that `rustc` rejects\n");
+
+    if summary.l3_checked == 0 {
+        let _ = writeln!(
+            out,
+            "Not measured ({}). No module was compiled, so an empty list here means",
+            summary
+                .l3_not_run_reason
+                .as_deref()
+                .unwrap_or("no reason recorded")
+        );
+        let _ = writeln!(out, "\"unknown\", not \"none\".\n");
+        return out;
+    }
+    if summary.l3_failed == 0 {
+        let _ = writeln!(
+            out,
+            "None — all {} compiled module(s) were accepted. See the stub-body count",
+            summary.l3_checked
+        );
+        let _ = writeln!(out, "above before reading that as working code.\n");
+        return out;
+    }
+
+    let mut codes: Vec<(&str, usize)> = summary
+        .l3_error_codes
+        .iter()
+        .map(|(k, v)| (k.as_str(), *v))
+        .collect();
+    codes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let _ = writeln!(out, "### Error codes by frequency\n");
+    let _ = writeln!(out, "| rank | code | count |");
+    let _ = writeln!(out, "|---|---|---:|");
+    for (i, (code, n)) in codes.iter().enumerate() {
+        let _ = writeln!(out, "| {} | `{}` | {} |", i + 1, code, n);
+    }
+    let _ = writeln!(out);
+
+    let _ = writeln!(out, "### Modules that do not compile\n");
+    let _ = writeln!(out, "| module | errors | first error |");
+    let _ = writeln!(out, "|---|---:|---|");
+    for f in summary
+        .files
+        .iter()
+        .filter(|f| f.l3_status == L3Status::Failed)
+    {
+        let first = f
+            .l3_errors
+            .first()
+            .map(|d| {
+                format!(
+                    "L{} {}{}",
+                    d.line,
+                    d.code
+                        .as_deref()
+                        .map(|c| format!("`{c}` "))
+                        .unwrap_or_default(),
+                    d.message.replace('|', "\\|")
+                )
+            })
+            .unwrap_or_else(|| "—".into());
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} |",
+            rel(&f.source),
+            f.l3_errors.len(),
+            first
+        );
+    }
+    let _ = writeln!(out);
     out
 }
 
@@ -452,6 +850,8 @@ pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGa
         );
         let _ = writeln!(out, "> a build that records the statement denominator.\n");
     }
+
+    let _ = writeln!(out, "{}", render_l3_block(summary));
 
     // What "expressible" actually counts. `Category::FunctionBody` is documented
     // as "signature emitted, body not fully lowered", so when its count equals
@@ -581,6 +981,8 @@ pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGa
     }
     let _ = writeln!(out);
 
+    out.push_str(&render_l3_section(&rel, summary));
+
     // --- failures, deliberately not folded into the rankings ----------------
     let failed: Vec<&FileResult> = summary.files.iter().filter(|f| f.error.is_some()).collect();
     let _ = writeln!(out, "## Files that did not parse\n");
@@ -619,7 +1021,6 @@ pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGa
 mod tests {
     use super::*;
     use std::io::Write;
-
 
     // --- report assertions -------------------------------------------------
     // Extracted so the tests below contain no string-offset arithmetic. Nine
@@ -679,12 +1080,49 @@ mod tests {
             expressible_fraction: frac,
             total_statements: 0,
             lowered_statements: 0,
+            l3_status: L3Status::NotRun,
+            l3_not_run_reason: Some("fixture: L3 not run".into()),
+            l3_errors: Vec::new(),
+            unlowered_bodies: 0,
             error: None,
         }
     }
 
+    /// Attach an L3 verdict to a fixture file. Two words at the call site beats
+    /// four field assignments, and keeps the tables below readable.
+    fn with_l3(
+        mut f: FileResult,
+        status: L3Status,
+        errs: &[(&str, &str)],
+        stubs: usize,
+    ) -> FileResult {
+        f.l3_status = status;
+        f.l3_not_run_reason = None;
+        f.unlowered_bodies = stubs;
+        f.l3_errors = errs
+            .iter()
+            .map(|(code, msg)| RustcDiag {
+                code: Some((*code).into()),
+                message: (*msg).into(),
+                line: 1,
+            })
+            .collect();
+        f
+    }
+
+    /// Build a summary by summing its files — the same trivial folds the batch
+    /// driver does, so a fixture cannot express an internally inconsistent run.
     fn summary_of(files: Vec<FileResult>) -> BatchSummary {
         let ok = files.iter().filter(|f| f.error.is_none()).count();
+        let count = |s: L3Status| files.iter().filter(|f| f.l3_status == s).count();
+        let mut codes: BTreeMap<String, usize> = BTreeMap::new();
+        for f in files.iter().filter(|f| f.l3_status == L3Status::Failed) {
+            for d in &f.l3_errors {
+                let k = d.code.clone().unwrap_or_else(|| "<uncoded>".into());
+                *codes.entry(k).or_insert(0) += 1;
+            }
+        }
+        let checked = count(L3Status::Passed) + count(L3Status::Failed);
         BatchSummary {
             total_files: files.len(),
             ok_files: ok,
@@ -693,6 +1131,22 @@ mod tests {
             total_top_level: files.iter().map(|f| f.total_top_level).sum(),
             total_statements: files.iter().map(|f| f.total_statements).sum(),
             lowered_statements: files.iter().map(|f| f.lowered_statements).sum(),
+            l3_checked: checked,
+            l3_passed: count(L3Status::Passed),
+            l3_failed: count(L3Status::Failed),
+            l3_passed_without_stubs: files
+                .iter()
+                .filter(|f| f.l3_status == L3Status::Passed && f.unlowered_bodies == 0)
+                .count(),
+            total_unlowered_bodies: files.iter().map(|f| f.unlowered_bodies).sum(),
+            total_stub_markers: files.iter().map(|f| f.unlowered_bodies).sum(),
+            l3_measurement_disagreements: 0,
+            l3_error_codes: codes,
+            l3_not_run_reason: if checked == 0 {
+                Some("fixture: L3 not run".into())
+            } else {
+                None
+            },
             files,
         }
     }
@@ -783,6 +1237,121 @@ mod tests {
         assert!(md.contains("not measured"), "got:\n{md}");
         assert!(!md.contains("L2 statement coverage: 0.0%"));
         assert!(md.contains("Absence of an L2 figure is not 0%"));
+    }
+
+    // --- L3 ----------------------------------------------------------------
+
+    #[test]
+    fn unmeasured_l3_is_not_reported_as_nothing_compiling() {
+        // Same failure mode as unmeasured L2, and the more dangerous of the two:
+        // "0% compiles" reads as a catastrophic regression rather than as an
+        // absent toolchain.
+        let md = render_ranked_report(
+            Path::new("/r"),
+            &summary_of(vec![fr("/r/a.py", 3, 0, 3, 1.0)]),
+            &union_of(&[]),
+        );
+        assert!(
+            md.contains("L3 compile gate: **not measured**"),
+            "got:\n{md}"
+        );
+        assert!(md.contains("Not measured is not 0%"));
+        assert!(!md.contains("L3 compiles: 0.0%"));
+        assert!(
+            section(&md, "## L3 — emitted Rust that `rustc` rejects")
+                .contains("\"unknown\", not \"none\""),
+            "an empty failure list under a not-run gate must not read as clean:\n{md}"
+        );
+    }
+
+    #[test]
+    fn compiling_stubs_do_not_read_as_working_code() {
+        // The corpus today emits signatures with `todo!()` bodies. Every one
+        // compiles. Reporting only that would be L1 in a new costume.
+        let summary = summary_of(vec![
+            with_l3(fr("/r/a.py", 2, 2, 2, 1.0), L3Status::Passed, &[], 2),
+            with_l3(fr("/r/b.py", 3, 3, 3, 1.0), L3Status::Passed, &[], 5),
+        ]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        assert!(md.contains("L3 compiles: 100.0%"), "got:\n{md}");
+        assert!(md.contains("L3 compiles with no stub body: 0.0%"));
+        assert!(md.contains("Everything that compiles is a stub"));
+        assert!(md.contains("unlowered bodies across the corpus: 7"));
+        assert_order(&md, "L3 compiles:", "L3 compiles with no stub body");
+    }
+
+    #[test]
+    fn partially_stubbed_corpus_is_quantified_not_absolutised() {
+        let summary = summary_of(vec![
+            with_l3(fr("/r/a.py", 2, 0, 2, 1.0), L3Status::Passed, &[], 0),
+            with_l3(fr("/r/b.py", 2, 0, 2, 1.0), L3Status::Passed, &[], 3),
+        ]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        assert!(!md.contains("Everything that compiles is a stub"));
+        assert!(
+            md.contains("1 of the 2 compiling module(s) still contain `todo!()` bodies"),
+            "got:\n{md}"
+        );
+    }
+
+    #[test]
+    fn l3_failures_rank_by_error_code_frequency() {
+        let summary = summary_of(vec![
+            with_l3(
+                fr("/r/a.py", 1, 0, 1, 1.0),
+                L3Status::Failed,
+                &[
+                    ("E0425", "cannot find value `os`"),
+                    ("E0425", "cannot find value `sys`"),
+                ],
+                0,
+            ),
+            with_l3(
+                fr("/r/b.py", 1, 0, 1, 1.0),
+                L3Status::Failed,
+                &[("E0308", "mismatched types")],
+                0,
+            ),
+            with_l3(fr("/r/c.py", 1, 0, 1, 1.0), L3Status::Passed, &[], 0),
+        ]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        let sec = section(&md, "## L3 — emitted Rust that `rustc` rejects");
+        assert_sequence(sec, &["| 1 | `E0425` | 2 |", "| 2 | `E0308` | 1 |"]);
+        assert!(
+            sec.contains("| `a.py` | 2 | L1 `E0425` cannot find value `os` |"),
+            "got:\n{sec}"
+        );
+        assert!(
+            !sec.contains("`c.py`"),
+            "a compiling module is not a failure"
+        );
+    }
+
+    #[test]
+    fn broken_output_outranks_unlowered_bodies_in_the_priority_report() {
+        // A module that emits and does not compile is worse than one that emits
+        // a signature: both count as emitted everywhere else, but only one of
+        // them is wrong rather than merely unfinished.
+        let mut sig = fr("/r/sig.py", 1, 0, 1, 1.0);
+        sig.total_statements = 400;
+        let broken = with_l3(
+            fr("/r/broken.py", 1, 0, 1, 1.0),
+            L3Status::Failed,
+            &[("E0433", "failed to resolve")],
+            0,
+        );
+        let summary = summary_of(vec![sig, broken]);
+        let md = render_priority_report(Path::new("/r"), &summary, &union_of(&[]), 10);
+        assert_order(&md, "id `l3:", "id `body:");
+        assert_eq!(
+            id_after(&md, "l3:"),
+            id_after(
+                &render_priority_report(Path::new("/r"), &summary, &union_of(&[]), 1),
+                "l3:"
+            ),
+            "id must not depend on the budget"
+        );
+        assert!(md.contains("They do not build."));
     }
 
     #[test]

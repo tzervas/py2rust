@@ -132,16 +132,36 @@ def ternary_expr(x: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "expr_tests.py", None).unwrap();
     assert_eq!(report.emitted_items.len(), 3);
-    assert!(report.gaps.is_empty(), "expected no gaps for supported logical and comparison expressions, got: {:?}", report.gaps);
+    assert!(
+        report.gaps.is_empty(),
+        "expected no gaps for supported logical and comparison expressions, got: {:?}",
+        report.gaps
+    );
 
     assert!(rust.contains("fn is_equal"), "Expected is_equal: {}", rust);
-    assert!(rust.contains("(x == y)"), "Expected == comparison: {}", rust);
+    assert!(
+        rust.contains("(x == y)"),
+        "Expected == comparison: {}",
+        rust
+    );
 
-    assert!(rust.contains("fn logical_or"), "Expected logical_or: {}", rust);
+    assert!(
+        rust.contains("fn logical_or"),
+        "Expected logical_or: {}",
+        rust
+    );
     assert!(rust.contains("(a || b)"), "Expected logical or: {}", rust);
 
-    assert!(rust.contains("fn ternary_expr"), "Expected ternary_expr: {}", rust);
-    assert!(rust.contains("(if (x > 0) { 1 } else { 0 })"), "Expected ternary conditional: {}", rust);
+    assert!(
+        rust.contains("fn ternary_expr"),
+        "Expected ternary_expr: {}",
+        rust
+    );
+    assert!(
+        rust.contains("(if (x > 0) { 1 } else { 0 })"),
+        "Expected ternary conditional: {}",
+        rust
+    );
 }
 
 #[test]

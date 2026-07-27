@@ -50,6 +50,10 @@ on:
         description: 'Proceed even if the build-script safety scan flags something'
         type: boolean
         default: false
+      skip_l3:
+        description: 'Skip the L3 compile gate (faster; the report can then only claim what was emitted, not that it builds)'
+        type: boolean
+        default: false
       grok_eval:
         description: 'Also queue a grok evaluation of the output (judgement only, never ground truth)'
         type: boolean
@@ -262,11 +266,21 @@ jobs:
           fi
 
       - name: Run batch analysis
+        env:
+          SKIP_L3: ${{ inputs.skip_l3 }}
         run: |
           set -euo pipefail
           mkdir -p out
+          # L3 hands every emitted module to rustc. It is on by default because
+          # emitted-but-uncompilable Rust counts as emitted in every other
+          # figure, so a report without L3 states coverage it cannot back.
+          L3ARG=""
+          if [ "$SKIP_L3" = "true" ]; then
+            L3ARG="--no-l3"
+            printf '::warning::L3 compile gate skipped — this report does not claim the output builds\n'
+          fi
           ./target/release/py2rust batch corpus-src/target \
-            --out out/artifacts --report out/corpus-report.md
+            --out out/artifacts --report out/corpus-report.md $L3ARG
           printf '\n--- report head ---\n'
           head -40 out/corpus-report.md
 

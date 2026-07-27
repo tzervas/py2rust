@@ -3,8 +3,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use py2rust_core::{
-    analyze_source, render_priority_report, render_ranked_report, transpile_batch,
-    transpile_source, GapReport,
+    analyze_source, render_priority_report, render_ranked_report, transpile_batch_with,
+    transpile_source, BatchOptions, GapReport,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -56,6 +56,14 @@ enum Commands {
         /// Cap on priority items. A long priority report is just the full one.
         #[arg(long, default_value_t = 15)]
         priority_budget: usize,
+        /// Skip the L3 gate (do not hand the emitted Rust to `rustc`).
+        ///
+        /// The gate is on by default: emitted Rust that `rustc` rejects still
+        /// counts as emitted in every other figure, so a run without L3 reports
+        /// coverage it cannot back. It costs one `rustc` invocation per file —
+        /// skip it on very large corpora where only the gap census is wanted.
+        #[arg(long)]
+        no_l3: bool,
         /// Also print the report to stdout.
         #[arg(long)]
         stdout: bool,
@@ -119,12 +127,14 @@ fn run() -> Result<()> {
             report,
             priority_report,
             priority_budget,
+            no_l3,
             stdout,
         } => {
             if !root.is_dir() {
                 anyhow::bail!("{} is not a directory", root.display());
             }
-            let (summary, union) = transpile_batch(&root, &out)
+            let opts = BatchOptions { check_l3: !no_l3 };
+            let (summary, union) = transpile_batch_with(&root, &out, &opts)
                 .with_context(|| format!("batch {} -> {}", root.display(), out.display()))?;
             let rendered = render_ranked_report(&root, &summary, &union);
             let report_path = report.unwrap_or_else(|| out.join("corpus-report.md"));
@@ -147,11 +157,26 @@ fn run() -> Result<()> {
             if stdout {
                 print!("{rendered}");
             }
+            let l3_line = if summary.l3_checked == 0 {
+                format!(
+                    "L3 not measured ({})",
+                    summary
+                        .l3_not_run_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                )
+            } else {
+                format!(
+                    "L3 {}/{} compile, {} of those with no todo!() body",
+                    summary.l3_passed, summary.l3_checked, summary.l3_passed_without_stubs
+                )
+            };
             eprintln!(
-                "batch: {} files, {} parsed, {} gaps\n  full     -> {}\n  priority -> {}",
+                "batch: {} files, {} parsed, {} gaps, {}\n  full     -> {}\n  priority -> {}",
                 summary.total_files,
                 summary.ok_files,
                 summary.total_gaps,
+                l3_line,
                 report_path.display(),
                 prio_path.display()
             );
