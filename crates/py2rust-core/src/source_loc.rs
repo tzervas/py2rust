@@ -24,12 +24,21 @@ pub fn line_col(source: &str, byte_offset: u32) -> (usize, usize) {
 
 /// Extract a snippet from source using half-open byte range `[start, end)`, truncated.
 pub fn snippet(source: &str, start: u32, end: u32, max_chars: usize) -> String {
-    let start = (start as usize).min(source.len());
-    let end = (end as usize).min(source.len()).max(start);
+    let mut start = (start as usize).min(source.len());
+    let mut end = (end as usize).min(source.len()).max(start);
+    while start < source.len() && !source.is_char_boundary(start) {
+        start += 1;
+    }
+    while end < source.len() && !source.is_char_boundary(end) {
+        end += 1;
+    }
+    if start > end {
+        end = start;
+    }
     let raw = &source[start..end];
     let mut out: String = raw.chars().take(max_chars).collect();
     if raw.chars().count() > max_chars {
-        out.push_str("…");
+        out.push('…');
     }
     // Collapse interior newlines for single-line reports.
     out.replace('\n', "\\n")
