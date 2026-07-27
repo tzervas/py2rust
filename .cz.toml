@@ -1,0 +1,35 @@
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_scheme = "semver"
+version = "0.2.0"
+
+# 0.x IS THE POLICY, NOT AN ACCIDENT.
+#
+# `major_version_zero = true` makes commitizen keep the major at 0 no matter what
+# the commit history says — a `feat!:` or a `BREAKING CHANGE:` footer bumps the
+# MINOR, not the major. Without it, the first breaking change in the log silently
+# ships 1.0.0, and 1.0.0 is a promise about API stability that nobody in this
+# fleet has made yet.
+#
+# Cutting 1.x is a human decision, taken deliberately:
+#   1. a human applies the `human-authorized-1x` label to the release PR
+#   2. that PR flips this flag to false in the same diff
+# Both steps in one reviewable change, so the version jump and the authorization
+# are never separated.
+major_version_zero = true
+
+# The changelog is written, not generated. `cz changelog` is the source for an
+# entry; a human edits it in. Left true, `cz bump` splices a version heading into
+# the middle of a curated Keep-a-Changelog file and orphans `## [Unreleased]`.
+update_changelog_on_bump = false
+
+# Every place this repo states its own version. Three files drifted here because
+# nothing kept them in lockstep: the Cargo workspace went to 0.2.0 with the Rust
+# scaffold (#12) while the Python package stayed at 0.1.0 — two version
+# identities in one repo, and no test or gate that could notice.
+version_files = [
+    "Cargo.toml:^version",
+    "pyproject.toml:^version",
+    "src/py2rust/__init__.py:__version__",
+]

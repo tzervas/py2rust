@@ -1,6 +1,6 @@
 [project]
 name = "py2rust"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python to Rust transpiler and code conversion assistant"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -51,6 +51,3 @@ ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"
-
-[tool.black]
-line-length = 100
