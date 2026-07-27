@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use py2rust_core::{analyze_source, transpile_source, GapReport};
+use py2rust_core::{
+    analyze_source, render_ranked_report, transpile_batch, transpile_source, GapReport,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -31,6 +33,25 @@ enum Commands {
         /// Print gap JSON to stdout.
         #[arg(long)]
         json: bool,
+    },
+    /// Transpile every `.py` under a tree; write a ranked corpus report.
+    ///
+    /// `transpile_batch` already existed in the library but was unreachable
+    /// from the CLI, so running the analysis over a real codebase meant writing
+    /// a driver by hand. This exposes it, and adds the ranking that makes the
+    /// output actionable rather than merely aggregated.
+    Batch {
+        /// Directory to walk. `__pycache__`, `.venv`, `.git` and `target` are skipped.
+        root: PathBuf,
+        /// Where the per-file `.rs` and `.gap.json` artifacts go.
+        #[arg(long, default_value = "target/py2rust-batch")]
+        out: PathBuf,
+        /// Ranked Markdown report (default: `<out>/corpus-report.md`).
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Also print the report to stdout.
+        #[arg(long)]
+        stdout: bool,
     },
     /// Transpile Python → Rust + `.gap.json` sidecar.
     Transpile {
@@ -82,6 +103,48 @@ fn run() -> Result<()> {
                 println!("{}", report.to_json_pretty()?);
             } else {
                 print_human_summary(&report);
+            }
+            Ok(())
+        }
+        Commands::Batch {
+            root,
+            out,
+            report,
+            stdout,
+        } => {
+            if !root.is_dir() {
+                anyhow::bail!("{} is not a directory", root.display());
+            }
+            let (summary, union) = transpile_batch(&root, &out)
+                .with_context(|| format!("batch {} -> {}", root.display(), out.display()))?;
+            let rendered = render_ranked_report(&root, &summary, &union);
+            let report_path = report.unwrap_or_else(|| out.join("corpus-report.md"));
+            if let Some(parent) = report_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("mkdir {}", parent.display()))?;
+                }
+            }
+            std::fs::write(&report_path, &rendered)
+                .with_context(|| format!("write {}", report_path.display()))?;
+            if stdout {
+                print!("{rendered}");
+            }
+            eprintln!(
+                "batch: {} files, {} parsed, {} gaps -> {}",
+                summary.total_files,
+                summary.ok_files,
+                summary.total_gaps,
+                report_path.display()
+            );
+            // A corpus where nothing parsed still writes a report, and that
+            // report would read as "no gaps found". Say so on stderr and exit
+            // non-zero rather than letting an empty run look like a clean one.
+            if summary.total_files > 0 && summary.ok_files == 0 {
+                anyhow::bail!(
+                    "no file parsed — the report is empty, not clean ({} discovered)",
+                    summary.total_files
+                );
             }
             Ok(())
         }

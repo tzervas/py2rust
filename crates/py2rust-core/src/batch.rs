@@ -171,10 +171,326 @@ pub fn transpile_batch(
     Ok((summary, union))
 }
 
+/// Render a ranked Markdown corpus report from a batch run.
+///
+/// `union.category_counts` is a `BTreeMap`, so it is ordered alphabetically —
+/// good for stable JSON, useless for deciding what to work on next. This ranks
+/// it by **measured frequency**, which is the point of running the analysis
+/// over a corpus at all: it turns "which gap category do we close next" from a
+/// judgement call into a count.
+///
+/// Modules are ranked by expressible fraction, highest first, because that is
+/// the port-order question — which module lowers most completely, and so costs
+/// least to finish by hand.
+///
+/// Ties break by name so the report is byte-stable across runs. It is meant to
+/// be committed and diffed, and one that reorders spuriously makes every diff
+/// meaningless.
+pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGapReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let root_s = root.display().to_string();
+    let rel = |s: &str| -> String {
+        s.strip_prefix(&root_s)
+            .unwrap_or(s)
+            .trim_start_matches('/')
+            .to_string()
+    };
+
+    let _ = writeln!(out, "# py2rust corpus report\n");
+    let _ = writeln!(out, "- root: `{root_s}`");
+    let _ = writeln!(
+        out,
+        "- files: {} discovered, {} parsed, {} failed",
+        summary.total_files,
+        summary.ok_files,
+        summary.total_files.saturating_sub(summary.ok_files)
+    );
+    let _ = writeln!(
+        out,
+        "- top-level items: {} | emitted: {} | gaps: {}",
+        summary.total_top_level, summary.total_emitted, summary.total_gaps
+    );
+    let overall = if summary.total_top_level == 0 {
+        0.0
+    } else {
+        summary.total_emitted as f64 / summary.total_top_level as f64 * 100.0
+    };
+    let _ = writeln!(out, "- overall expressible: {overall:.1}%\n");
+
+    // What "expressible" actually counts. `Category::FunctionBody` is documented
+    // as "signature emitted, body not fully lowered", so when its count equals
+    // the emitted count, EVERY emitted item is a signature with an unlowered
+    // body -- and the percentage above measures signature emission, not ported
+    // code. Measured on tg-agent-relay: 585 == 585 across 91/91 modules. Left
+    // unsaid, someone reads "70% expressible" as "70% ported" and plans a
+    // release around it.
+    let fb = union
+        .category_counts
+        .get("FunctionBody")
+        .copied()
+        .unwrap_or(0);
+    if summary.total_emitted > 0 && fb == summary.total_emitted {
+        let _ = writeln!(
+            out,
+            "> **Read that number carefully.** `FunctionBody` gaps ({fb}) exactly equal emitted"
+        );
+        let _ = writeln!(
+            out,
+            "> items ({}), and that category means *signature emitted, body not lowered*. So",
+            summary.total_emitted
+        );
+        let _ = writeln!(
+            out,
+            "> every emitted item here is a signature only: the percentage measures signature"
+        );
+        let _ = writeln!(
+            out,
+            "> emission, not ported code. Treat it as an upper bound on progress, never as"
+        );
+        let _ = writeln!(out, "> completion.\n");
+    } else if summary.total_emitted > 0 && fb > 0 {
+        let partial = fb as f64 / summary.total_emitted as f64 * 100.0;
+        let _ = writeln!(
+            out,
+            "> Note: {fb} of {} emitted items ({partial:.0}%) are signature-only",
+            summary.total_emitted
+        );
+        let _ = writeln!(out, "> (`FunctionBody` gap). The rest lowered fully.\n");
+    }
+
+    // --- categories, ranked by measured frequency ---------------------------
+    let mut cats: Vec<(&str, usize)> =
+        union.category_counts.iter().map(|(k, v)| (*k, *v)).collect();
+    cats.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    let total_gaps: usize = cats.iter().map(|(_, n)| *n).sum();
+
+    let _ = writeln!(out, "## Gap categories by measured frequency\n");
+    if cats.is_empty() {
+        let _ = writeln!(
+            out,
+            "No gaps recorded. Either the corpus lowered completely, or nothing was"
+        );
+        let _ = writeln!(
+            out,
+            "analysed — check the file count above before reading this as success.\n"
+        );
+    } else {
+        let _ = writeln!(out, "| rank | category | count | share |");
+        let _ = writeln!(out, "|---|---|---:|---:|");
+        for (i, (cat, n)) in cats.iter().enumerate() {
+            let share = if total_gaps == 0 {
+                0.0
+            } else {
+                *n as f64 / total_gaps as f64 * 100.0
+            };
+            let _ = writeln!(out, "| {} | `{}` | {} | {:.1}% |", i + 1, cat, n, share);
+        }
+        let _ = writeln!(out);
+    }
+
+    // --- modules, ranked by how completely they lower -----------------------
+    // Gap.file and FileResult.source are both `path.display().to_string()` of
+    // the same Path, so this join is exact rather than best-effort.
+    let mut per_file: BTreeMap<&str, BTreeMap<&'static str, usize>> = BTreeMap::new();
+    for g in &union.gaps {
+        *per_file
+            .entry(g.file.as_str())
+            .or_default()
+            .entry(g.category.as_str())
+            .or_insert(0) += 1;
+    }
+
+    let mut ok_files: Vec<&FileResult> =
+        summary.files.iter().filter(|f| f.error.is_none()).collect();
+    ok_files.sort_by(|a, b| {
+        b.expressible_fraction
+            .partial_cmp(&a.expressible_fraction)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.source.cmp(&b.source))
+    });
+
+    let _ = writeln!(out, "## Modules by expressible fraction\n");
+    let _ = writeln!(out, "Highest first — cheapest to finish by hand.\n");
+    let _ = writeln!(
+        out,
+        "| module | top-level | emitted | gaps | expressible | dominant gaps |"
+    );
+    let _ = writeln!(out, "|---|---:|---:|---:|---:|---|");
+    for f in &ok_files {
+        let dominant = match per_file.get(f.source.as_str()) {
+            None => "—".to_string(),
+            Some(m) => {
+                let mut v: Vec<(&str, usize)> = m.iter().map(|(k, n)| (*k, *n)).collect();
+                v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                v.iter()
+                    .take(3)
+                    .map(|(c, n)| format!("{c}×{n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        let _ = writeln!(
+            out,
+            "| `{}` | {} | {} | {} | {:.0}% | {} |",
+            rel(&f.source),
+            f.total_top_level,
+            f.emitted,
+            f.gaps,
+            f.expressible_fraction * 100.0,
+            dominant
+        );
+    }
+    let _ = writeln!(out);
+
+    // --- failures, deliberately not folded into the rankings ----------------
+    let failed: Vec<&FileResult> = summary.files.iter().filter(|f| f.error.is_some()).collect();
+    let _ = writeln!(out, "## Files that did not parse\n");
+    if failed.is_empty() {
+        let _ = writeln!(out, "None.\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "These contributed no gaps and no emitted items, so they are absent from"
+        );
+        let _ = writeln!(
+            out,
+            "every ranking above. A high expressible fraction next to a long list here"
+        );
+        let _ = writeln!(
+            out,
+            "means the corpus was barely read, not that it lowered well.\n"
+        );
+        let _ = writeln!(out, "| module | error |");
+        let _ = writeln!(out, "|---|---|");
+        for f in failed {
+            let _ = writeln!(
+                out,
+                "| `{}` | {} |",
+                rel(&f.source),
+                f.error.as_deref().unwrap_or("").replace('|', "\\|")
+            );
+        }
+        let _ = writeln!(out);
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn fr(source: &str, emitted: usize, gaps: usize, top: usize, frac: f64) -> FileResult {
+        FileResult {
+            source: source.into(),
+            rust_path: None,
+            gap_path: None,
+            emitted,
+            gaps,
+            total_top_level: top,
+            expressible_fraction: frac,
+            error: None,
+        }
+    }
+
+    fn summary_of(files: Vec<FileResult>) -> BatchSummary {
+        let ok = files.iter().filter(|f| f.error.is_none()).count();
+        BatchSummary {
+            total_files: files.len(),
+            ok_files: ok,
+            total_emitted: files.iter().map(|f| f.emitted).sum(),
+            total_gaps: files.iter().map(|f| f.gaps).sum(),
+            total_top_level: files.iter().map(|f| f.total_top_level).sum(),
+            files,
+        }
+    }
+
+    fn union_of(counts: &[(&'static str, usize)]) -> UnionGapReport {
+        UnionGapReport {
+            gaps: Vec::new(),
+            category_counts: counts.iter().copied().collect(),
+            file_count: 1,
+        }
+    }
+
+    #[test]
+    fn report_ranks_categories_by_frequency_not_alphabetically() {
+        // category_counts is a BTreeMap, so its natural order is alphabetical:
+        // Async, DynamicTyping, Import. Ranked output must not be.
+        let union = union_of(&[("Async", 3), ("DynamicTyping", 40), ("Import", 12)]);
+        let summary = summary_of(vec![fr("/r/a.py", 1, 55, 4, 0.25)]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union);
+        let dt = md.find("`DynamicTyping`").unwrap();
+        let im = md.find("`Import`").unwrap();
+        let asy = md.find("`Async`").unwrap();
+        assert!(dt < im && im < asy, "ranked by count desc, got:\n{md}");
+        assert!(md.contains("| 1 | `DynamicTyping` | 40 |"));
+    }
+
+    #[test]
+    fn signature_only_caveat_fires_when_functionbody_equals_emitted() {
+        let union = union_of(&[("FunctionBody", 5), ("DynamicTyping", 9)]);
+        let summary = summary_of(vec![fr("/r/a.py", 5, 14, 10, 0.5)]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union);
+        assert!(
+            md.contains("Read that number carefully"),
+            "must warn that expressible counts signatures, not ported code:\n{md}"
+        );
+    }
+
+    #[test]
+    fn no_caveat_when_some_items_lowered_fully() {
+        let union = union_of(&[("FunctionBody", 2), ("DynamicTyping", 9)]);
+        let summary = summary_of(vec![fr("/r/a.py", 5, 11, 10, 0.5)]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union);
+        assert!(!md.contains("Read that number carefully"));
+        assert!(md.contains("signature-only"), "should still quantify it:\n{md}");
+    }
+
+    #[test]
+    fn modules_rank_by_expressible_desc_with_stable_tiebreak() {
+        let summary = summary_of(vec![
+            fr("/r/low.py", 1, 9, 10, 0.10),
+            fr("/r/b_tie.py", 5, 5, 10, 0.50),
+            fr("/r/a_tie.py", 5, 5, 10, 0.50),
+            fr("/r/high.py", 9, 1, 10, 0.90),
+        ]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        let order: Vec<usize> = ["high.py", "a_tie.py", "b_tie.py", "low.py"]
+            .iter()
+            .map(|n| md.find(n).unwrap_or_else(|| panic!("missing {n} in\n{md}")))
+            .collect();
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "expected high, a_tie, b_tie, low — ties by name for stable diffs:\n{md}"
+        );
+    }
+
+    #[test]
+    fn unparsed_files_are_listed_and_excluded_from_rankings() {
+        let mut bad = fr("/r/broken.py", 0, 0, 0, 0.0);
+        bad.error = Some("Parse: unexpected token".into());
+        let summary = summary_of(vec![fr("/r/ok.py", 5, 5, 10, 0.5), bad]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        assert!(md.contains("| `broken.py` | Parse: unexpected token |"));
+        assert!(md.contains("1 discovered") || md.contains("2 discovered, 1 parsed, 1 failed"));
+        // It must not appear in the ranked module table as a 0% row, which would
+        // read as "analysed and found empty" rather than "never read".
+        let table = &md[md.find("## Modules by expressible").unwrap()
+            ..md.find("## Files that did not parse").unwrap()];
+        assert!(!table.contains("broken.py"), "unparsed file leaked into rankings:\n{table}");
+    }
+
+    #[test]
+    fn empty_corpus_does_not_read_as_clean() {
+        let md = render_ranked_report(Path::new("/r"), &summary_of(vec![]), &union_of(&[]));
+        assert!(
+            md.contains("check the file count above before reading this as success"),
+            "an empty run must not look like a gap-free one:\n{md}"
+        );
+    }
 
     #[test]
     fn discover_and_batch_smoke() {
