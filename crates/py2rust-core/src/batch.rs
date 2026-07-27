@@ -42,6 +42,10 @@ pub struct FileResult {
     pub gaps: usize,
     pub total_top_level: usize,
     pub expressible_fraction: f64,
+    /// L2 denominator: every statement, nested included.
+    pub total_statements: usize,
+    /// L2 numerator: statements for which Rust was emitted.
+    pub lowered_statements: usize,
     pub error: Option<String>,
 }
 
@@ -54,6 +58,8 @@ pub struct BatchSummary {
     pub total_emitted: usize,
     pub total_gaps: usize,
     pub total_top_level: usize,
+    pub total_statements: usize,
+    pub lowered_statements: usize,
 }
 
 /// Union of all gaps across a batch (for backlog ranking).
@@ -94,6 +100,8 @@ pub fn transpile_batch(
     let mut total_emitted = 0usize;
     let mut total_gaps = 0usize;
     let mut total_top = 0usize;
+    let mut total_stmts = 0usize;
+    let mut lowered_stmts = 0usize;
     let mut ok = 0usize;
 
     for path in &files {
@@ -119,6 +127,8 @@ pub fn transpile_batch(
                 total_emitted += report.emitted_items.len();
                 total_gaps += report.real_gap_count();
                 total_top += report.total_top_level_items;
+                total_stmts += report.total_statements;
+                lowered_stmts += report.lowered_statement_count();
                 ok += 1;
                 file_results.push(FileResult {
                     source: path.display().to_string(),
@@ -128,6 +138,8 @@ pub fn transpile_batch(
                     gaps: report.real_gap_count(),
                     total_top_level: report.total_top_level_items,
                     expressible_fraction: report.expressible_fraction(),
+                    total_statements: report.total_statements,
+                    lowered_statements: report.lowered_statement_count(),
                     error: None,
                 });
                 reports.push(report);
@@ -141,6 +153,8 @@ pub fn transpile_batch(
                     gaps: 0,
                     total_top_level: 0,
                     expressible_fraction: 0.0,
+                    total_statements: 0,
+                    lowered_statements: 0,
                     error: Some(e.to_string()),
                 });
             }
@@ -154,6 +168,8 @@ pub fn transpile_batch(
         total_emitted,
         total_gaps,
         total_top_level: total_top,
+        total_statements: total_stmts,
+        lowered_statements: lowered_stmts,
     };
     let union = UnionGapReport::from_reports(&reports);
 
@@ -216,7 +232,55 @@ pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGa
     } else {
         summary.total_emitted as f64 / summary.total_top_level as f64 * 100.0
     };
-    let _ = writeln!(out, "- overall expressible: {overall:.1}%\n");
+    let _ = writeln!(out, "- L1 top-level expressible: {overall:.1}%");
+
+    // L2 leads, because L1 is measured against top-level items only and real
+    // code keeps ~82% of its statements inside bodies. Reporting L1 alone
+    // overstates progress by roughly 5x.
+    if summary.total_statements > 0 {
+        let l2 = summary.lowered_statements as f64 / summary.total_statements as f64 * 100.0;
+        let inside = summary
+            .total_statements
+            .saturating_sub(summary.total_top_level);
+        let inside_pct = inside as f64 / summary.total_statements as f64 * 100.0;
+        let _ = writeln!(
+            out,
+            "- **L2 statement coverage: {l2:.1}%** ({} of {} statements lowered)",
+            summary.lowered_statements, summary.total_statements
+        );
+        let _ = writeln!(
+            out,
+            "- statements inside bodies: {inside} ({inside_pct:.1}% of all statements)\n"
+        );
+        let _ = writeln!(
+            out,
+            "> **L2 is the number to steer by.** L1 counts only top-level items, so it"
+        );
+        let _ = writeln!(
+            out,
+            "> measures against {} statements while the module actually contains {}.",
+            summary.total_top_level, summary.total_statements
+        );
+        let _ = writeln!(
+            out,
+            "> L2 counts every statement, nested included, and an emitted signature"
+        );
+        let _ = writeln!(
+            out,
+            "> whose body did not lower counts as exactly one statement — not as its"
+        );
+        let _ = writeln!(out, "> whole body.\n");
+    } else {
+        let _ = writeln!(
+            out,
+            "- L2 statement coverage: **not measured** (no statement denominator recorded)\n"
+        );
+        let _ = writeln!(
+            out,
+            "> Absence of an L2 figure is not 0% — it means nothing counted. Re-run with"
+        );
+        let _ = writeln!(out, "> a build that records the statement denominator.\n");
+    }
 
     // What "expressible" actually counts. `Category::FunctionBody` is documented
     // as "signature emitted, body not fully lowered", so when its count equals
@@ -391,6 +455,8 @@ mod tests {
             gaps,
             total_top_level: top,
             expressible_fraction: frac,
+            total_statements: 0,
+            lowered_statements: 0,
             error: None,
         }
     }
@@ -403,6 +469,8 @@ mod tests {
             total_emitted: files.iter().map(|f| f.emitted).sum(),
             total_gaps: files.iter().map(|f| f.gaps).sum(),
             total_top_level: files.iter().map(|f| f.total_top_level).sum(),
+            total_statements: files.iter().map(|f| f.total_statements).sum(),
+            lowered_statements: files.iter().map(|f| f.lowered_statements).sum(),
             files,
         }
     }
@@ -413,6 +481,36 @@ mod tests {
             category_counts: counts.iter().copied().collect(),
             file_count: 1,
         }
+    }
+
+    fn fr_l2(source: &str, emitted: usize, total_stmts: usize) -> FileResult {
+        let mut f = fr(source, emitted, 0, emitted, 1.0);
+        f.total_statements = total_stmts;
+        f.lowered_statements = emitted;
+        f
+    }
+
+    #[test]
+    fn l2_is_reported_and_leads_l1() {
+        let summary = summary_of(vec![fr_l2("/r/a.py", 3, 60)]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        assert!(md.contains("L2 statement coverage: 5.0%"), "got:\n{md}");
+        assert!(md.contains("3 of 60 statements lowered"));
+        assert!(
+            md.find("L2 statement coverage").unwrap() > md.find("L1 top-level").unwrap(),
+            "L2 must appear with L1, not replace it"
+        );
+    }
+
+    #[test]
+    fn unmeasured_l2_is_not_reported_as_zero() {
+        // total_statements == 0 means "never counted". Rendering that as 0.0%
+        // would be the /proc-is-blind mistake in a new costume.
+        let summary = summary_of(vec![fr("/r/a.py", 3, 0, 3, 1.0)]);
+        let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
+        assert!(md.contains("not measured"), "got:\n{md}");
+        assert!(!md.contains("L2 statement coverage: 0.0%"));
+        assert!(md.contains("Absence of an L2 figure is not 0%"));
     }
 
     #[test]
