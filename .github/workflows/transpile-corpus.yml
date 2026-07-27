@@ -42,10 +42,14 @@ on:
         type: string
         default: dev
       source_kind:
-        description: 'Where to fetch the target from'
+        description: 'Where to fetch the target from (auto prefers a GitHub release over PyPI)'
         type: choice
-        options: [auto, git, pypi]
+        options: [auto, github-release, git, gitlab, pypi]
         default: auto
+      allow_unsafe:
+        description: 'Proceed even if the build-script safety scan flags something'
+        type: boolean
+        default: false
       grok_eval:
         description: 'Also queue a grok evaluation of the output (judgement only, never ground truth)'
         type: boolean
@@ -79,30 +83,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Decide git vs pypi. A URL or owner/repo is git; a bare name is pypi.
+          # Source preference: a GitHub (or GitLab) release or tag beats a PyPI
+          # sdist. Both are third-party code, but PyPI has the worse
+          # supply-chain history, and a released tarball is attached to a
+          # reviewable tag in a repository with history -- an sdist is whatever
+          # the uploader chose to upload.
           KIND="$KIND_IN"
           if [ "$KIND" = "auto" ]; then
             case "$TARGET" in
+              *gitlab.com*|*gitlab.*) KIND="gitlab" ;;
               http://*|https://*|git@*|*.git) KIND="git" ;;
-              */*) KIND="git" ;;
+              */*) KIND="github-release" ;;
               *) KIND="pypi" ;;
             esac
           fi
 
           # Slug: PEP 503 normalisation for pypi (lowercase, runs of -_. to -),
-          # owner-repo for git so two projects named "utils" cannot collide.
+          # owner-repo elsewhere so two projects named "utils" cannot collide.
+          slugify_path() {
+            printf '%s' "$1" | tr '[:upper:]/' '[:lower:]-' \
+              | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-|-$//g'
+          }
+          strip_host() {
+            printf '%s' "$1" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##'
+          }
+
           case "$KIND" in
             pypi)
               SLUG="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed -E 's/[-_.]+/-/g')"
               FETCH="$TARGET"
               ;;
-            git)
-              STRIPPED="$(printf '%s' "$TARGET" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##')"
-              SLUG="$(printf '%s' "$STRIPPED" | tr '[:upper:]/' '[:lower:]-' | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-|-$//g')"
+            github-release|git)
+              STRIPPED="$(strip_host "$TARGET")"
+              SLUG="$(slugify_path "$STRIPPED")"
               case "$TARGET" in
                 http://*|https://*|git@*) FETCH="$TARGET" ;;
-                *) FETCH="https://github.com/${TARGET}.git" ;;
+                *) FETCH="$STRIPPED" ;;
               esac
+              ;;
+            gitlab)
+              STRIPPED="$(strip_host "$TARGET")"
+              SLUG="gl-$(slugify_path "$STRIPPED")"
+              FETCH="$STRIPPED"
               ;;
           esac
 
@@ -161,23 +183,83 @@ jobs:
           FETCH: ${{ needs.resolve.outputs.fetch_ref }}
         run: |
           set -euo pipefail
-          mkdir -p corpus-src
-          if [ "$KIND" = "git" ]; then
-            git clone --depth 1 --quiet "$FETCH" corpus-src/target
-          else
-            # PyPI JSON API + direct sdist extraction. NOT `pip download`, which
-            # can execute setup.py during metadata generation.
-            URL="$(curl -fsSL "https://pypi.org/pypi/${FETCH}/json" \
-                   | jq -r '[.urls[] | select(.packagetype=="sdist")][0].url // empty')"
-            if [ -z "$URL" ]; then
-              echo "::error::no sdist found for '$FETCH' on PyPI"; exit 1
-            fi
-            printf 'sdist: %s\n' "$URL"
-            curl -fsSL -o /tmp/pkg.tar.gz "$URL"
-            mkdir -p corpus-src/target
-            tar -xzf /tmp/pkg.tar.gz -C corpus-src/target --strip-components=1
-          fi
+          mkdir -p corpus-src/target
+          untar() { tar -xzf "$1" -C corpus-src/target --strip-components=1; }
+
+          case "$KIND" in
+            github-release)
+              # Prefer the latest release tarball; fall back to the default
+              # branch tarball if the project cuts no releases. Both come from
+              # the repository rather than an independently uploaded artifact.
+              REL="$(curl -fsSL "https://api.github.com/repos/${FETCH}/releases/latest" 2>/dev/null \
+                     | jq -r '.tarball_url // empty')"
+              if [ -n "$REL" ]; then
+                printf 'source: github release %s\n' "$REL"
+                curl -fsSL -o /tmp/pkg.tar.gz "$REL"
+              else
+                printf 'source: github default branch (no releases published)\n'
+                curl -fsSL -o /tmp/pkg.tar.gz "https://api.github.com/repos/${FETCH}/tarball"
+              fi
+              untar /tmp/pkg.tar.gz
+              ;;
+            gitlab)
+              ENC="$(printf '%s' "$FETCH" | jq -sRr @uri)"
+              printf 'source: gitlab %s\n' "$FETCH"
+              curl -fsSL -o /tmp/pkg.tar.gz \
+                "https://gitlab.com/api/v4/projects/${ENC}/repository/archive.tar.gz"
+              untar /tmp/pkg.tar.gz
+              ;;
+            git)
+              printf 'source: git clone %s\n' "$FETCH"
+              rmdir corpus-src/target
+              git clone --depth 1 --quiet "$FETCH" corpus-src/target
+              ;;
+            pypi)
+              # PyPI JSON API + direct sdist extraction. NOT `pip download`,
+              # which can execute setup.py during metadata generation.
+              URL="$(curl -fsSL "https://pypi.org/pypi/${FETCH}/json" \
+                     | jq -r '[.urls[] | select(.packagetype=="sdist")][0].url // empty')"
+              if [ -z "$URL" ]; then
+                echo "::error::no sdist found for '$FETCH' on PyPI"; exit 1
+              fi
+              printf 'source: pypi sdist %s\n' "$URL"
+              printf '::warning::PyPI sdist used. An sdist is whatever the uploader chose to upload; a GitHub release is attached to a reviewable tag. Prefer owner/repo where one exists.\n'
+              curl -fsSL -o /tmp/pkg.tar.gz "$URL"
+              untar /tmp/pkg.tar.gz
+              ;;
+          esac
           printf 'python files: %s\n' "$(find corpus-src/target -name '*.py' | wc -l)"
+
+      - name: Build-script safety scan
+        env:
+          ALLOW: ${{ inputs.allow_unsafe }}
+        run: |
+          set -uo pipefail
+          # This job only PARSES Python, so nothing here executes. The scan
+          # exists because L4 will execute it, and because a package whose
+          # build scripts fetch and decode blobs is worth knowing about before
+          # it reaches a runner that can run it.
+          #
+          # Scoped to build/config entry points -- the files a package manager
+          # executes without being asked. Flagging network calls across an
+          # entire library would be noise; flagging them in setup.py is signal.
+          FINDINGS=0
+          for f in setup.py setup.cfg pyproject.toml conftest.py; do
+            p="corpus-src/target/$f"
+            [ -f "$p" ] || continue
+            while IFS= read -r pat; do
+              if grep -nE "$pat" "$p" >/dev/null 2>&1; then
+                printf '::warning file=%s::matches %s\n' "$f" "$pat"
+                grep -nE "$pat" "$p" | head -3 | sed 's/^/      /'
+                FINDINGS=$((FINDINGS + 1))
+              fi
+            done < .github/build-script-red-flags.txt
+          done
+          printf 'safety scan: %d finding(s)\n' "$FINDINGS"
+          if [ "$FINDINGS" -gt 0 ] && [ "$ALLOW" != "true" ]; then
+            printf '::error::build scripts matched %d red flag(s). Review above. Re-run with allow_unsafe=true to proceed anyway.\n' "$FINDINGS"
+            exit 1
+          fi
 
       - name: Run batch analysis
         run: |
