@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use py2rust_core::{
-    analyze_source, render_ranked_report, transpile_batch, transpile_source, GapReport,
+    analyze_source, render_priority_report, render_ranked_report, transpile_batch,
+    transpile_source, GapReport,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -49,6 +50,12 @@ enum Commands {
         /// Ranked Markdown report (default: `<out>/corpus-report.md`).
         #[arg(long)]
         report: Option<PathBuf>,
+        /// Short high-priority worklist (default: `<out>/priority-report.md`).
+        #[arg(long)]
+        priority_report: Option<PathBuf>,
+        /// Cap on priority items. A long priority report is just the full one.
+        #[arg(long, default_value_t = 15)]
+        priority_budget: usize,
         /// Also print the report to stdout.
         #[arg(long)]
         stdout: bool,
@@ -110,6 +117,8 @@ fn run() -> Result<()> {
             root,
             out,
             report,
+            priority_report,
+            priority_budget,
             stdout,
         } => {
             if !root.is_dir() {
@@ -127,15 +136,24 @@ fn run() -> Result<()> {
             }
             std::fs::write(&report_path, &rendered)
                 .with_context(|| format!("write {}", report_path.display()))?;
+
+            // Two reports on purpose: the full one is the record to drill into,
+            // the priority one answers "what do I do next" and is useless the
+            // moment it stops being short.
+            let prio = render_priority_report(&root, &summary, &union, priority_budget);
+            let prio_path = priority_report.unwrap_or_else(|| out.join("priority-report.md"));
+            std::fs::write(&prio_path, &prio)
+                .with_context(|| format!("write {}", prio_path.display()))?;
             if stdout {
                 print!("{rendered}");
             }
             eprintln!(
-                "batch: {} files, {} parsed, {} gaps -> {}",
+                "batch: {} files, {} parsed, {} gaps\n  full     -> {}\n  priority -> {}",
                 summary.total_files,
                 summary.ok_files,
                 summary.total_gaps,
-                report_path.display()
+                report_path.display(),
+                prio_path.display()
             );
             // A corpus where nothing parsed still writes a report, and that
             // report would read as "no gaps found". Say so on stderr and exit

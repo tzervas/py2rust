@@ -187,6 +187,177 @@ pub fn transpile_batch(
     Ok((summary, union))
 }
 
+/// Short, stable identifier for a priority item.
+///
+/// Derived from *what to fix*, never from a line number: line-keyed ids churn on
+/// every unrelated edit, which makes two priority reports undiffable and destroys
+/// the delta model. FNV-1a is enough — this needs to be stable and short, not
+/// unforgeable.
+fn stable_id(key: &str) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in key.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    format!("{h:08x}")
+}
+
+/// Render the **high-priority** report — the short list, not the record.
+///
+/// Split from the full report on purpose. The full report is for drilling into;
+/// this answers "what do I do next", and is useless the moment it stops being
+/// short. Three rules keep it that way:
+///
+/// 1. **Bounded.** `budget` caps the item count. A priority report with 400
+///    entries is the full report wearing a different title.
+/// 2. **States what it omitted.** A short list that does not say how much it left
+///    out reads as the complete picture — the same failure as an unmeasured value
+///    rendering as 0%.
+/// 3. **Stable ids**, so two runs diff and progress is visible.
+///
+/// Ranking today is a **proxy**: unparsed files first (nothing else surfaces
+/// them), then signature-only modules, then category frequency. The ranking that
+/// matters is blast radius — closure size over the gap graph — which lands once
+/// gaps record their dependencies.
+pub fn render_priority_report(
+    root: &Path,
+    summary: &BatchSummary,
+    union: &UnionGapReport,
+    budget: usize,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let root_s = root.display().to_string();
+    let rel = |s: &str| -> String {
+        s.strip_prefix(&root_s)
+            .unwrap_or(s)
+            .trim_start_matches('/')
+            .to_string()
+    };
+    let mut shown = 0usize;
+    let mut candidates = 0usize;
+
+    let _ = writeln!(out, "# py2rust — high priority\n");
+    let _ = writeln!(out, "- root: `{root_s}`");
+    let _ = writeln!(
+        out,
+        "- budget: {budget} item(s); full detail in the corpus report\n"
+    );
+
+    // 1. Unparsed files. First because they are invisible everywhere else: they
+    //    contribute no gaps and no emitted items, so coverage *improves* as more
+    //    files fail to parse.
+    let failed: Vec<&FileResult> = summary.files.iter().filter(|f| f.error.is_some()).collect();
+    candidates += failed.len();
+    if !failed.is_empty() {
+        let _ = writeln!(out, "## Did not parse — fix first\n");
+        let _ = writeln!(
+            out,
+            "These contribute no gaps and no emitted items, so every percentage is"
+        );
+        let _ = writeln!(
+            out,
+            "computed as though they do not exist — coverage improves as more files"
+        );
+        let _ = writeln!(out, "fail. Nothing else surfaces them.\n");
+        for f in failed.iter() {
+            if shown >= budget {
+                break;
+            }
+            let r = rel(&f.source);
+            let _ = writeln!(
+                out,
+                "- `{}` — id `parse:{}` — {}",
+                r,
+                stable_id(&r),
+                f.error.as_deref().unwrap_or("")
+            );
+            shown += 1;
+        }
+        let _ = writeln!(out);
+    }
+
+    // 2. Signatures emitted, bodies not lowered — ranked by how much is behind them.
+    let mut sig_only: Vec<&FileResult> = summary
+        .files
+        .iter()
+        .filter(|f| f.error.is_none() && f.emitted > 0 && f.total_statements > f.emitted)
+        .collect();
+    candidates += sig_only.len();
+    if shown < budget && !sig_only.is_empty() {
+        sig_only.sort_by(|a, b| {
+            (b.total_statements - b.emitted)
+                .cmp(&(a.total_statements - a.emitted))
+                .then_with(|| a.source.cmp(&b.source))
+        });
+        let _ = writeln!(out, "## Signatures only — most unlowered body statements\n");
+        for f in sig_only.iter() {
+            if shown >= budget {
+                break;
+            }
+            let r = rel(&f.source);
+            let _ = writeln!(
+                out,
+                "- `{}` — id `body:{}` — {} of {} statements unlowered",
+                r,
+                stable_id(&r),
+                f.total_statements - f.emitted,
+                f.total_statements
+            );
+            shown += 1;
+        }
+        let _ = writeln!(out);
+    }
+
+    // 3. Category frequency — a proxy for leverage until the gap graph exists.
+    let mut cats: Vec<(&str, usize)> = union
+        .category_counts
+        .iter()
+        .map(|(k, v)| (*k, *v))
+        .collect();
+    cats.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    if !cats.is_empty() {
+        let _ = writeln!(out, "## Largest gap categories\n");
+        let _ = writeln!(
+            out,
+            "Ranked by **frequency**, which is a proxy. Frequency says what is common;"
+        );
+        let _ = writeln!(
+            out,
+            "it does not say what is leveraged. The ranking that matters is blast"
+        );
+        let _ = writeln!(
+            out,
+            "radius — how many other gaps each root cause unblocks — and it arrives"
+        );
+        let _ = writeln!(out, "once gaps record their dependencies.\n");
+        for (c, n) in cats.iter().take(5) {
+            let _ = writeln!(out, "- `{c}` — {n}");
+        }
+        let _ = writeln!(out);
+    }
+
+    // 4. What was left out. Never omitted.
+    let _ = writeln!(out, "## Omitted\n");
+    let omitted = candidates.saturating_sub(shown);
+    let _ = writeln!(
+        out,
+        "Showing **{shown}** of **{candidates}** candidate item(s); **{omitted}** not listed."
+    );
+    let _ = writeln!(
+        out,
+        "Total recorded gaps across the corpus: **{}**.",
+        union.gaps.len()
+    );
+    let _ = writeln!(
+        out,
+        "\nThis is a worklist, not a survey. Absence from it is not evidence of"
+    );
+    let _ = writeln!(out, "correctness — see the corpus report for everything.");
+
+    out
+}
+
 /// Render a ranked Markdown corpus report from a batch run.
 ///
 /// `union.category_counts` is a `BTreeMap`, so it is ordered alphabetically —
@@ -324,8 +495,11 @@ pub fn render_ranked_report(root: &Path, summary: &BatchSummary, union: &UnionGa
     }
 
     // --- categories, ranked by measured frequency ---------------------------
-    let mut cats: Vec<(&str, usize)> =
-        union.category_counts.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut cats: Vec<(&str, usize)> = union
+        .category_counts
+        .iter()
+        .map(|(k, v)| (*k, *v))
+        .collect();
     cats.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
     let total_gaps: usize = cats.iter().map(|(_, n)| *n).sum();
 
@@ -491,6 +665,62 @@ mod tests {
     }
 
     #[test]
+    fn priority_report_respects_its_budget_and_says_what_it_omitted() {
+        let mut files = Vec::new();
+        for i in 0..12 {
+            let mut f = fr(&format!("/r/m{i:02}.py"), 1, 0, 1, 1.0);
+            f.total_statements = 50 + i;
+            f.lowered_statements = 1;
+            files.push(f);
+        }
+        let summary = summary_of(files);
+        let md = render_priority_report(Path::new("/r"), &summary, &union_of(&[]), 3);
+        let listed = md.matches("— id `body:").count();
+        assert_eq!(listed, 3, "budget of 3 must cap the list:\n{md}");
+        assert!(
+            md.contains("Showing **3** of **12**") && md.contains("**9** not listed"),
+            "must state what it omitted:\n{md}"
+        );
+        assert!(md.contains("not evidence of"), "must disclaim completeness");
+    }
+
+    #[test]
+    fn priority_ids_are_stable_and_line_independent() {
+        // Same file, different statement counts -- the id must not move, or two
+        // runs cannot be diffed and the delta model is worthless.
+        let mut a = fr("/r/x.py", 1, 0, 1, 1.0);
+        a.total_statements = 40;
+        let mut b = fr("/r/x.py", 1, 0, 1, 1.0);
+        b.total_statements = 900;
+        let ma = render_priority_report(Path::new("/r"), &summary_of(vec![a]), &union_of(&[]), 5);
+        let mb = render_priority_report(Path::new("/r"), &summary_of(vec![b]), &union_of(&[]), 5);
+        let id = |m: &str| {
+            let i = m.find("id `body:").unwrap() + 9;
+            m[i..i + 8].to_string()
+        };
+        assert_eq!(
+            id(&ma),
+            id(&mb),
+            "id must key on the file, not its contents"
+        );
+    }
+
+    #[test]
+    fn unparsed_files_lead_the_priority_report() {
+        let mut bad = fr("/r/broken.py", 0, 0, 0, 0.0);
+        bad.error = Some("Parse: bad token".into());
+        let mut ok = fr("/r/big.py", 1, 0, 1, 1.0);
+        ok.total_statements = 500;
+        let summary = summary_of(vec![ok, bad]);
+        let md = render_priority_report(Path::new("/r"), &summary, &union_of(&[]), 10);
+        assert!(
+            md.find("broken.py").unwrap() < md.find("big.py").unwrap(),
+            "unparsed files are invisible elsewhere, so they lead:\n{md}"
+        );
+        assert!(md.contains("coverage improves as more files"));
+    }
+
+    #[test]
     fn l2_is_reported_and_leads_l1() {
         let summary = summary_of(vec![fr_l2("/r/a.py", 3, 60)]);
         let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
@@ -544,7 +774,10 @@ mod tests {
         let summary = summary_of(vec![fr("/r/a.py", 5, 11, 10, 0.5)]);
         let md = render_ranked_report(Path::new("/r"), &summary, &union);
         assert!(!md.contains("Read that number carefully"));
-        assert!(md.contains("signature-only"), "should still quantify it:\n{md}");
+        assert!(
+            md.contains("signature-only"),
+            "should still quantify it:\n{md}"
+        );
     }
 
     #[test]
@@ -578,7 +811,10 @@ mod tests {
         // read as "analysed and found empty" rather than "never read".
         let table = &md[md.find("## Modules by expressible").unwrap()
             ..md.find("## Files that did not parse").unwrap()];
-        assert!(!table.contains("broken.py"), "unparsed file leaked into rankings:\n{table}");
+        assert!(
+            !table.contains("broken.py"),
+            "unparsed file leaked into rankings:\n{table}"
+        );
     }
 
     #[test]
