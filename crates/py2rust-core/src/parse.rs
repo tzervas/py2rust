@@ -206,51 +206,108 @@ mod tests {
 mod l2_tests {
     use super::*;
 
-    fn n(src: &str) -> usize {
-        parse_source(src, "t.py").expect("parse").statement_count()
+    /// One row per shape the counter must handle.
+    ///
+    /// Table-driven so adding a Python construct is a one-line change rather
+    /// than a new test function — the assertion logic is identical for every
+    /// case, and duplicating it per shape is how counter tests drift apart.
+    struct Case {
+        name: &'static str,
+        src: &'static str,
+        /// Expected total statements, nested included.
+        total: usize,
+        /// Expected top-level statements — the L1 denominator, for contrast.
+        top: usize,
+    }
+
+    const CASES: &[Case] = &[
+        Case {
+            name: "flat module: L1 and L2 agree",
+            src: "a = 1\nb = 2\nc = 3\n",
+            total: 3,
+            top: 3,
+        },
+        Case {
+            name: "function body is invisible to L1",
+            src: "def f():\n    a = 1\n    b = 2\n    return a + b\n",
+            total: 4,
+            top: 1,
+        },
+        Case {
+            name: "try: except/else/finally must all be walked",
+            src: concat!(
+                "try:\n    a = 1\n",
+                "except ValueError:\n    b = 2\n",
+                "except TypeError:\n    c = 3\n",
+                "else:\n    d = 4\n",
+                "finally:\n    e = 5\n",
+            ),
+            total: 6,
+            top: 1,
+        },
+        Case {
+            name: "loop else clause counts",
+            src: "for i in r:\n    p = 1\nelse:\n    q = 2\n",
+            total: 3,
+            top: 1,
+        },
+        Case {
+            name: "if/else both branches count",
+            src: "if c:\n    w = 1\nelse:\n    y = 1\n",
+            total: 3,
+            top: 1,
+        },
+        Case {
+            name: "class body and its methods count",
+            src: "class C:\n    x = 1\n    def m(self):\n        return 2\n",
+            total: 4,
+            top: 1,
+        },
+        Case {
+            name: "with block body counts",
+            src: "with open(f) as h:\n    v = 1\n",
+            total: 2,
+            top: 1,
+        },
+        Case {
+            name: "while body and else count",
+            src: "while t:\n    u = 1\nelse:\n    z = 2\n",
+            total: 3,
+            top: 1,
+        },
+    ];
+
+    #[test]
+    fn statement_counter_matches_every_shape() {
+        for c in CASES {
+            let m = parse_source(c.src, "t.py").expect(c.name);
+            assert_eq!(
+                m.statement_count(),
+                c.total,
+                "L2 total wrong for case: {}\n--- source ---\n{}",
+                c.name,
+                c.src
+            );
+            assert_eq!(
+                m.top_level_count(),
+                c.top,
+                "L1 top-level wrong for case: {}\n--- source ---\n{}",
+                c.name,
+                c.src
+            );
+        }
     }
 
     #[test]
-    fn counts_nested_not_just_top_level() {
-        // 1 def + 3 body statements = 4, where top_level_count() would say 1.
-        let src = "def f():\n    a = 1\n    b = 2\n    return a + b\n";
-        assert_eq!(n(src), 4);
-        let m = parse_source(src, "t.py").unwrap();
-        assert_eq!(m.top_level_count(), 1, "L1 sees one item; L2 must see four");
-    }
-
-    #[test]
-    fn walks_orelse_and_finally_and_handlers() {
-        // A denominator that skips else/finally/except would undercount, which
-        // is the same class of error L2 exists to remove.
-        let src = concat!(
-            "try:\n    a = 1\n",
-            "except ValueError:\n    b = 2\n",
-            "except TypeError:\n    c = 3\n",
-            "else:\n    d = 4\n",
-            "finally:\n    e = 5\n",
-        );
-        assert_eq!(n(src), 6, "try + 5 nested statements");
-    }
-
-    #[test]
-    fn walks_loop_and_if_else_and_with_and_class() {
-        let src = concat!(
-            "class C:\n    x = 1\n    def m(self):\n        return 2\n",
-            "for i in r:\n    p = 1\nelse:\n    q = 2\n",
-            "while t:\n    u = 1\n",
-            "with open(f) as h:\n    v = 1\n",
-            "if c:\n    w = 1\nelse:\n    y = 1\n",
-        );
-        // class(1)+x(1)+def(1)+return(1) + for(1)+p(1)+q(1) + while(1)+u(1)
-        // + with(1)+v(1) + if(1)+w(1)+y(1) = 14
-        assert_eq!(n(src), 14);
-    }
-
-    #[test]
-    fn flat_module_matches_top_level() {
-        let src = "a = 1\nb = 2\nc = 3\n";
-        let m = parse_source(src, "t.py").unwrap();
-        assert_eq!(m.statement_count(), m.top_level_count());
+    fn nesting_is_what_separates_l1_from_l2() {
+        // The whole reason L2 exists: on anything with bodies, L1 undercounts.
+        for c in CASES.iter().filter(|c| c.total != c.top) {
+            let m = parse_source(c.src, "t.py").unwrap();
+            assert!(
+                m.statement_count() > m.top_level_count(),
+                "case {:?} should have hidden statements",
+                c.name
+            );
+        }
     }
 }

@@ -620,6 +620,54 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+
+    // --- report assertions -------------------------------------------------
+    // Extracted so the tests below contain no string-offset arithmetic. Nine
+    // separate `md.find(..).unwrap()` expressions is nine independent ways for a
+    // wording change to break a test for a reason unrelated to what it asserts.
+
+    /// Assert `first` appears before `second`, naming both on failure.
+    fn assert_order(md: &str, first: &str, second: &str) {
+        let a = md
+            .find(first)
+            .unwrap_or_else(|| panic!("missing {first:?} in report:\n{md}"));
+        let b = md
+            .find(second)
+            .unwrap_or_else(|| panic!("missing {second:?} in report:\n{md}"));
+        assert!(a < b, "expected {first:?} before {second:?}:\n{md}");
+    }
+
+    /// Assert every marker appears, in the order given.
+    fn assert_sequence(md: &str, markers: &[&str]) {
+        for pair in markers.windows(2) {
+            assert_order(md, pair[0], pair[1]);
+        }
+    }
+
+    /// The body of one `## ` section, so a test can assert about that section
+    /// alone rather than slicing the whole document by hand.
+    fn section<'a>(md: &'a str, heading: &str) -> &'a str {
+        let start = md
+            .find(heading)
+            .unwrap_or_else(|| panic!("no section {heading:?} in:\n{md}"));
+        let rest = &md[start + heading.len()..];
+        match rest.find("\n## ") {
+            Some(end) => &rest[..end],
+            None => rest,
+        }
+    }
+
+    /// The stable id following `prefix`, e.g. "body:" -> "5628a1f0".
+    fn id_after<'a>(md: &'a str, prefix: &str) -> &'a str {
+        let marker = format!("id `{prefix}");
+        let at = md
+            .find(&marker)
+            .unwrap_or_else(|| panic!("no id with prefix {prefix:?} in:\n{md}"));
+        let rest = &md[at + marker.len()..];
+        let end = rest.find('`').unwrap_or(rest.len());
+        &rest[..end]
+    }
+
     fn fr(source: &str, emitted: usize, gaps: usize, top: usize, frac: f64) -> FileResult {
         FileResult {
             source: source.into(),
@@ -713,10 +761,7 @@ mod tests {
         ok.total_statements = 500;
         let summary = summary_of(vec![ok, bad]);
         let md = render_priority_report(Path::new("/r"), &summary, &union_of(&[]), 10);
-        assert!(
-            md.find("broken.py").unwrap() < md.find("big.py").unwrap(),
-            "unparsed files are invisible elsewhere, so they lead:\n{md}"
-        );
+        assert_order(&md, "broken.py", "big.py");
         assert!(md.contains("coverage improves as more files"));
     }
 
@@ -726,10 +771,7 @@ mod tests {
         let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
         assert!(md.contains("L2 statement coverage: 5.0%"), "got:\n{md}");
         assert!(md.contains("3 of 60 statements lowered"));
-        assert!(
-            md.find("L2 statement coverage").unwrap() > md.find("L1 top-level").unwrap(),
-            "L2 must appear with L1, not replace it"
-        );
+        assert_order(&md, "L1 top-level", "L2 statement coverage");
     }
 
     #[test]
@@ -750,10 +792,7 @@ mod tests {
         let union = union_of(&[("Async", 3), ("DynamicTyping", 40), ("Import", 12)]);
         let summary = summary_of(vec![fr("/r/a.py", 1, 55, 4, 0.25)]);
         let md = render_ranked_report(Path::new("/r"), &summary, &union);
-        let dt = md.find("`DynamicTyping`").unwrap();
-        let im = md.find("`Import`").unwrap();
-        let asy = md.find("`Async`").unwrap();
-        assert!(dt < im && im < asy, "ranked by count desc, got:\n{md}");
+        assert_sequence(&md, &["`DynamicTyping`", "`Import`", "`Async`"]);
         assert!(md.contains("| 1 | `DynamicTyping` | 40 |"));
     }
 
@@ -789,14 +828,7 @@ mod tests {
             fr("/r/high.py", 9, 1, 10, 0.90),
         ]);
         let md = render_ranked_report(Path::new("/r"), &summary, &union_of(&[]));
-        let order: Vec<usize> = ["high.py", "a_tie.py", "b_tie.py", "low.py"]
-            .iter()
-            .map(|n| md.find(n).unwrap_or_else(|| panic!("missing {n} in\n{md}")))
-            .collect();
-        assert!(
-            order.windows(2).all(|w| w[0] < w[1]),
-            "expected high, a_tie, b_tie, low — ties by name for stable diffs:\n{md}"
-        );
+        assert_sequence(&md, &["high.py", "a_tie.py", "b_tie.py", "low.py"]);
     }
 
     #[test]
