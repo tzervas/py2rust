@@ -20,9 +20,7 @@ pub mod map;
 pub mod parse;
 pub mod source_loc;
 
-pub use batch::{
-    discover_py_files, transpile_batch, BatchSummary, FileResult, UnionGapReport,
-};
+pub use batch::{discover_py_files, transpile_batch, BatchSummary, FileResult, UnionGapReport};
 pub use dispatch::{
     analyze_file, analyze_source, dispatch_stmt, transpile_file, transpile_source, DispatchError,
     Outcome,

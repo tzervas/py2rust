@@ -240,10 +240,7 @@ impl GapReport {
 
 /// Compute `<stem>.gap.json` path for a source or output file.
 pub fn gap_json_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("out");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.join(format!("{stem}.gap.json")),
         _ => PathBuf::from(format!("{stem}.gap.json")),
