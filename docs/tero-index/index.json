@@ -1,5 +1,5 @@
 {
-  "generated": "Empirical/Declared — lite heading/line heuristic over markdown in py2rust via tero-mcp/scripts/generate_lite_index.py; source files are ground truth. Generated 2026-07-09.",
+  "generated": "Empirical/Declared \u2014 lite heading/line heuristic over markdown in py2rust via tero-mcp/scripts/generate_lite_index.py; source files are ground truth. Generated 2026-07-09.",
   "item_tag": "Empirical/Declared",
   "siblings": [],
   "items": [
@@ -7,11 +7,11 @@
       "anchor": "agents",
       "family": "doc",
       "kind": "other",
-      "title": "AGENTS.md — py2rust",
+      "title": "AGENTS.md \u2014 py2rust",
       "file": "AGENTS.md",
       "line": 2,
       "tag": "Empirical/Declared",
-      "summary": "Use Tero + cabal-devmelopner for work here."
+      "summary": "**Use Tero + cabal-devmelopner for work here.**"
     },
     {
       "anchor": "agents--tero-layer-1-corpus-index",
@@ -21,10 +21,10 @@
       "file": "AGENTS.md",
       "line": 6,
       "tag": "Empirical/Declared",
-      "summary": "Repo has docs/tero-index/index.json (generated/ refreshed via tero-mcp/scripts/generateliteindex.py)."
+      "summary": "Repo has `docs/tero-index/index.json` (generated/ refreshed via tero-mcp/scripts/generate_lite_in..."
     },
     {
-      "anchor": "agents--agent-with-context",
+      "anchor": "agents",
       "family": "doc",
       "kind": "other",
       "title": "agent with context:",
@@ -51,7 +51,7 @@
       "file": "AGENTS.md",
       "line": 36,
       "tag": "Empirical/Declared",
-      "summary": "Look for:"
+      "summary": "Prefer the **Rust** product path:"
     },
     {
       "anchor": "agents--further-reading",
@@ -59,19 +59,19 @@
       "kind": "section",
       "title": "Further reading",
       "file": "AGENTS.md",
-      "line": 44,
+      "line": 53,
       "tag": "Empirical/Declared",
       "summary": "- README.md"
     },
     {
-      "anchor": "agents--hygiene-tero-landing-chore-tero-index-cabal-ready-2026-07-09-appended",
+      "anchor": "agents--hygiene-tero-landing-choretero-index-cabal-ready-2026-07-09-appended",
       "family": "doc",
       "kind": "section",
       "title": "Hygiene + Tero landing (chore/tero-index-cabal-ready, 2026-07-09 appended)",
       "file": "AGENTS.md",
-      "line": 54,
+      "line": 63,
       "tag": "Empirical/Declared",
-      "summary": "Tero-first (via /root/git/scripts/tero.sh identify + textsearch \"chore tero hygiene check ROADMAP scaffolding\" + cites to AGENTS local-checks, tero-index)."
+      "summary": "Tero-first (via /root/git/scripts/tero.sh identify + text_search \"chore tero hygiene check ROADMA..."
     },
     {
       "anchor": "readme",
@@ -81,47 +81,147 @@
       "file": "README.md",
       "line": 1,
       "tag": "Empirical/Declared",
-      "summary": "Python to Rust transpiler and code conversion assistant."
+      "summary": "[![CI](https://github.com/tzervas/py2rust/actions/workflows/fleet-ci.yml/badge.svg?branch=main)](..."
     },
     {
-      "anchor": "readme--installation",
+      "anchor": "readme--status",
       "family": "doc",
       "kind": "section",
-      "title": "Installation",
+      "title": "Status",
       "file": "README.md",
-      "line": 5,
+      "line": 14,
       "tag": "Empirical/Declared",
-      "summary": "pip install py2rust"
+      "summary": "| Item | State |"
     },
     {
-      "anchor": "readme--usage",
+      "anchor": "readme--5-minute-path",
       "family": "doc",
       "kind": "section",
-      "title": "Usage",
+      "title": "5-minute path",
       "file": "README.md",
-      "line": 11,
+      "line": 24,
       "tag": "Empirical/Declared",
-      "summary": "Transpile Python code to Rust:"
+      "summary": "Requirements: Rust **1.85+** (see `rust-toolchain.toml`)."
     },
     {
-      "anchor": "readme--features",
+      "anchor": "readme",
       "family": "doc",
-      "kind": "section",
-      "title": "Features",
+      "kind": "other",
+      "title": "\u2192 py2rust 0.2.0",
       "file": "README.md",
-      "line": 25,
+      "line": 36,
       "tag": "Empirical/Declared",
-      "summary": "- AST-based Transpilation: Convert Python syntax to equivalent Rust constructs"
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simple_fn.py"
     },
     {
-      "anchor": "readme--current-limitations",
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "Analyze fixture (writes .gap.json beside source)",
+      "file": "README.md",
+      "line": 38,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simple_fn.py"
+    },
+    {
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "Transpile to a temp path",
+      "file": "README.md",
+      "line": 41,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- transpile crates/py2rust-core/fixtures/simple_fn.py -o /tmp/simple_fn.rs"
+    },
+    {
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "\u2192 /tmp/simple_fn.rs + /tmp/simple_fn.gap.json",
+      "file": "README.md",
+      "line": 43,
+      "tag": "Empirical/Declared",
+      "summary": "```"
+    },
+    {
+      "anchor": "readme--example",
       "family": "doc",
       "kind": "section",
-      "title": "Current Limitations",
+      "title": "Example",
       "file": "README.md",
-      "line": 32,
+      "line": 54,
       "tag": "Empirical/Declared",
-      "summary": "This is an early-stage transpiler that handles basic function conversion. Complex Python features like:"
+      "summary": "```python"
+    },
+    {
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "demo.py",
+      "file": "README.md",
+      "line": 57,
+      "tag": "Empirical/Declared",
+      "summary": "def add(x: int, y: int) -> int:"
+    },
+    {
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "\u2192 demo.rs  (emits add)",
+      "file": "README.md",
+      "line": 67,
+      "tag": "Empirical/Declared",
+      "summary": "```"
+    },
+    {
+      "anchor": "readme",
+      "family": "doc",
+      "kind": "other",
+      "title": "\u2192 demo.gap.json  (Class gap for Foo)",
+      "file": "README.md",
+      "line": 68,
+      "tag": "Empirical/Declared",
+      "summary": "```"
+    },
+    {
+      "anchor": "readme--architecture",
+      "family": "doc",
+      "kind": "section",
+      "title": "Architecture",
+      "file": "README.md",
+      "line": 71,
+      "tag": "Empirical/Declared",
+      "summary": "```text"
+    },
+    {
+      "anchor": "readme--gap-categories-not-silent-failures",
+      "family": "doc",
+      "kind": "section",
+      "title": "Gap categories (not silent failures)",
+      "file": "README.md",
+      "line": 92,
+      "tag": "Empirical/Declared",
+      "summary": "| Category | What is flagged |"
+    },
+    {
+      "anchor": "readme--what-works-today-mvp",
+      "family": "doc",
+      "kind": "section",
+      "title": "What works today (MVP)",
+      "file": "README.md",
+      "line": 110,
+      "tag": "Empirical/Declared",
+      "summary": "- Top-level `def foo(x: int) -> int` with a simple body (`return` constant, name, or binary op)"
+    },
+    {
+      "anchor": "readme--what-does-not-work-by-design-later-packages",
+      "family": "doc",
+      "kind": "section",
+      "title": "What does **not** work (by design / later packages)",
+      "file": "README.md",
+      "line": 117,
+      "tag": "Empirical/Declared",
+      "summary": "- Full semantic equivalence Python \u2194 Rust"
     },
     {
       "anchor": "readme--development",
@@ -129,39 +229,19 @@
       "kind": "section",
       "title": "Development",
       "file": "README.md",
-      "line": 43,
+      "line": 124,
       "tag": "Empirical/Declared",
-      "summary": "This project uses [uv](https://github.com/astral-sh/uv) for dependency management."
+      "summary": "```bash"
     },
     {
-      "anchor": "readme--install-dependencies",
+      "anchor": "readme--python-scaffold-deprecated",
       "family": "doc",
-      "kind": "other",
-      "title": "Install dependencies",
+      "kind": "section",
+      "title": "Python scaffold (deprecated)",
       "file": "README.md",
-      "line": 48,
+      "line": 132,
       "tag": "Empirical/Declared",
-      "summary": "uv sync"
-    },
-    {
-      "anchor": "readme--run-tests",
-      "family": "doc",
-      "kind": "other",
-      "title": "Run tests",
-      "file": "README.md",
-      "line": 51,
-      "tag": "Empirical/Declared",
-      "summary": "uv run pytest"
-    },
-    {
-      "anchor": "readme--format-code",
-      "family": "doc",
-      "kind": "other",
-      "title": "Format code",
-      "file": "README.md",
-      "line": 54,
-      "tag": "Empirical/Declared",
-      "summary": "uv run black src/"
+      "summary": "`src/py2rust/` remains as a **legacy** thin CLI. Prefer the Rust binary:"
     },
     {
       "anchor": "readme--license",
@@ -169,20 +249,20 @@
       "kind": "section",
       "title": "License",
       "file": "README.md",
-      "line": 59,
+      "line": 142,
       "tag": "Empirical/Declared",
-      "summary": "MIT License - see [LICENSE](LICENSE) for details."
+      "summary": "MIT \u2014 see [LICENSE](LICENSE)."
     },
     {
       "anchor": "roadmap",
       "family": "doc",
       "kind": "note",
-      "title": "py2rust — Roadmap",
+      "title": "py2rust \u2014 Roadmap",
       "file": "docs/ROADMAP.md",
       "line": 1,
       "tag": "Empirical/Declared",
-      "status": "Scaffolding / hygiene (2026-07-09)",
-      "summary": "Status: Scaffolding / hygiene (2026-07-09)"
+      "summary": "**Status:** Scaffolding / hygiene (2026-07-09)",
+      "status": "Scaffolding / hygiene (2026-07-09)"
     },
     {
       "anchor": "roadmap--waves-minimal-for-scaffolding",
@@ -198,7 +278,7 @@
       "anchor": "roadmap--wave-h-hygiene-tero-closure-this-chore",
       "family": "doc",
       "kind": "section",
-      "title": "Wave H — Hygiene & Tero closure (this chore)",
+      "title": "Wave H \u2014 Hygiene & Tero closure (this chore)",
       "file": "docs/ROADMAP.md",
       "line": 11,
       "tag": "Empirical/Declared",
@@ -208,11 +288,21 @@
       "anchor": "roadmap--wave-p-polish-integration",
       "family": "doc",
       "kind": "section",
-      "title": "Wave P — Polish & Integration",
+      "title": "Wave P \u2014 Polish & Integration",
       "file": "docs/ROADMAP.md",
       "line": 17,
       "tag": "Empirical/Declared",
       "summary": "- cabal-devmelopner integration + tero for transpiler hints"
+    },
+    {
+      "anchor": "roadmap--wave-m-python-mycelium-native-map-gap-closure-scaffolding",
+      "family": "doc",
+      "kind": "section",
+      "title": "Wave M \u2014 Python \u2192 Mycelium-native map (gap closure scaffolding)",
+      "file": "docs/ROADMAP.md",
+      "line": 22,
+      "tag": "Empirical/Declared",
+      "summary": "- Stable contract: `PyConstruct` / `MycForm` / `Guarantee` / `Citation` / `MapOutcome`"
     }
   ],
   "flagged": []
