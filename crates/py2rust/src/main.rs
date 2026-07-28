@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use py2rust_core::{analyze_source, transpile_source, GapReport};
+use py2rust_core::{
+    analyze_source, render_priority_report, render_ranked_report, transpile_batch_with,
+    transpile_source, BatchOptions, GapReport,
+};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -31,6 +34,39 @@ enum Commands {
         /// Print gap JSON to stdout.
         #[arg(long)]
         json: bool,
+    },
+    /// Transpile every `.py` under a tree; write a ranked corpus report.
+    ///
+    /// `transpile_batch` already existed in the library but was unreachable
+    /// from the CLI, so running the analysis over a real codebase meant writing
+    /// a driver by hand. This exposes it, and adds the ranking that makes the
+    /// output actionable rather than merely aggregated.
+    Batch {
+        /// Directory to walk. `__pycache__`, `.venv`, `.git` and `target` are skipped.
+        root: PathBuf,
+        /// Where the per-file `.rs` and `.gap.json` artifacts go.
+        #[arg(long, default_value = "target/py2rust-batch")]
+        out: PathBuf,
+        /// Ranked Markdown report (default: `<out>/corpus-report.md`).
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// Short high-priority worklist (default: `<out>/priority-report.md`).
+        #[arg(long)]
+        priority_report: Option<PathBuf>,
+        /// Cap on priority items. A long priority report is just the full one.
+        #[arg(long, default_value_t = 15)]
+        priority_budget: usize,
+        /// Skip the L3 gate (do not hand the emitted Rust to `rustc`).
+        ///
+        /// The gate is on by default: emitted Rust that `rustc` rejects still
+        /// counts as emitted in every other figure, so a run without L3 reports
+        /// coverage it cannot back. It costs one `rustc` invocation per file —
+        /// skip it on very large corpora where only the gap census is wanted.
+        #[arg(long)]
+        no_l3: bool,
+        /// Also print the report to stdout.
+        #[arg(long)]
+        stdout: bool,
     },
     /// Transpile Python → Rust + `.gap.json` sidecar.
     Transpile {
@@ -82,6 +118,76 @@ fn run() -> Result<()> {
                 println!("{}", report.to_json_pretty()?);
             } else {
                 print_human_summary(&report);
+            }
+            Ok(())
+        }
+        Commands::Batch {
+            root,
+            out,
+            report,
+            priority_report,
+            priority_budget,
+            no_l3,
+            stdout,
+        } => {
+            if !root.is_dir() {
+                anyhow::bail!("{} is not a directory", root.display());
+            }
+            let opts = BatchOptions { check_l3: !no_l3 };
+            let (summary, union) = transpile_batch_with(&root, &out, &opts)
+                .with_context(|| format!("batch {} -> {}", root.display(), out.display()))?;
+            let rendered = render_ranked_report(&root, &summary, &union);
+            let report_path = report.unwrap_or_else(|| out.join("corpus-report.md"));
+            if let Some(parent) = report_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("mkdir {}", parent.display()))?;
+                }
+            }
+            std::fs::write(&report_path, &rendered)
+                .with_context(|| format!("write {}", report_path.display()))?;
+
+            // Two reports on purpose: the full one is the record to drill into,
+            // the priority one answers "what do I do next" and is useless the
+            // moment it stops being short.
+            let prio = render_priority_report(&root, &summary, &union, priority_budget);
+            let prio_path = priority_report.unwrap_or_else(|| out.join("priority-report.md"));
+            std::fs::write(&prio_path, &prio)
+                .with_context(|| format!("write {}", prio_path.display()))?;
+            if stdout {
+                print!("{rendered}");
+            }
+            let l3_line = if summary.l3_checked == 0 {
+                format!(
+                    "L3 not measured ({})",
+                    summary
+                        .l3_not_run_reason
+                        .as_deref()
+                        .unwrap_or("no reason recorded")
+                )
+            } else {
+                format!(
+                    "L3 {}/{} compile, {} of those with no todo!() body",
+                    summary.l3_passed, summary.l3_checked, summary.l3_passed_without_stubs
+                )
+            };
+            eprintln!(
+                "batch: {} files, {} parsed, {} gaps, {}\n  full     -> {}\n  priority -> {}",
+                summary.total_files,
+                summary.ok_files,
+                summary.total_gaps,
+                l3_line,
+                report_path.display(),
+                prio_path.display()
+            );
+            // A corpus where nothing parsed still writes a report, and that
+            // report would read as "no gaps found". Say so on stderr and exit
+            // non-zero rather than letting an empty run look like a clean one.
+            if summary.total_files > 0 && summary.ok_files == 0 {
+                anyhow::bail!(
+                    "no file parsed — the report is empty, not clean ({} discovered)",
+                    summary.total_files
+                );
             }
             Ok(())
         }

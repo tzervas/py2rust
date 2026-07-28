@@ -2,7 +2,7 @@
 //! Partial emission always carries sub-gaps (never silent TODO bodies).
 
 use crate::gap::{Category, GapReason};
-use crate::map::{is_any_annotation, map_type_expr};
+use crate::map::{is_any_annotation, map_type_expr, rust_ident, IdentFix};
 use rustpython_parser::ast::{self, Ranged};
 
 /// Result of attempting to emit a construct.
@@ -24,6 +24,20 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     let name = func.name.to_string();
     let mut sub_gaps = Vec::new();
 
+    // Rust-legal name. `name` stays the Python one — it is what the gap report
+    // and every human-facing message refer to.
+    let (rs_name, fix) = rust_ident(&name);
+    if matches!(fix, IdentFix::Renamed) {
+        sub_gaps.push(GapReason::new(
+            Category::Other,
+            format!(
+                "function `{name}` is a Rust keyword with no raw form; emitted as `{rs_name}`. \
+                 Callers still say `{name}` — renaming is the only legal lowering, so this is \
+                 flagged rather than fixed."
+            ),
+        ));
+    }
+
     // Decorators: dispatch usually gaps the whole item; if we still get here, record sub-gap.
     if !func.decorator_list.is_empty() {
         sub_gaps.push(GapReason::new(
@@ -37,6 +51,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     }
 
     let mut args_out = Vec::new();
+    let mut arg_types: Vec<(String, String)> = Vec::new();
     for arg in func
         .args
         .posonlyargs
@@ -77,7 +92,21 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
                 }
             },
         };
-        args_out.push(format!("{aname}: {ty}"));
+        // Parameters need the same escape as the function name: `def f(type)`
+        // and `def f(match)` are ordinary Python.
+        let (rs_aname, afix) = rust_ident(&aname);
+        if matches!(afix, IdentFix::Renamed) {
+            sub_gaps.push(GapReason::new(
+                Category::Other,
+                format!(
+                    "parameter `{aname}` of `{name}` is a Rust keyword with no raw form; \
+                     emitted as `{rs_aname}`"
+                ),
+            ));
+        }
+        // Keyed on the Python name, because that is what the body refers to.
+        arg_types.push((aname.clone(), ty.clone()));
+        args_out.push(format!("{rs_aname}: {ty}"));
     }
 
     if func.args.vararg.is_some() || func.args.kwarg.is_some() {
@@ -121,7 +150,16 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     // Nested honesty: scan body for exception / metaprogramming / lambda.
     scan_body_for_sub_gaps(&func.body, &name, &mut sub_gaps);
 
-    let body_lowered = try_lower_simple_body(&func.body, ret_is_unit);
+    // Only unambiguous scalars enter the environment. A parameter whose type was
+    // a placeholder (`/* dyn */ i32`) is left out so inference declines instead
+    // of reasoning from a guess — the same rule the gap report follows.
+    let env: TypeEnv = arg_types
+        .into_iter()
+        .filter(|(_, t)| matches!(t.as_str(), "i64" | "f64" | "bool" | "String"))
+        .collect();
+    let ret_scalar =
+        matches!(ret_ty.as_str(), "i64" | "f64" | "bool" | "String").then(|| ret_ty.clone());
+    let body_lowered = try_lower_simple_body(&func.body, ret_is_unit, &env, ret_scalar.as_deref());
     let body_text = match body_lowered {
         Some(b) => b,
         None => {
@@ -129,20 +167,23 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
                 Category::FunctionBody,
                 format!("function body of `{name}` not lowered — flag not guess (no silent TODO)"),
             ));
-            if ret_is_unit {
-                "    // GAP: FunctionBody — body not lowered (flag not guess)\n".to_string()
-            } else {
-                format!(
-                    "    // GAP: FunctionBody — body not lowered (flag not guess)\n    todo!(\"py2rust: body of `{name}` not lowered\")\n"
-                )
-            }
+            // `todo!()` regardless of return type. A unit-returning function
+            // used to get an empty body instead, which compiles *and returns
+            // normally* — so an unlowered body silently did nothing at runtime,
+            // which is the one thing this transpiler promises never to do. It
+            // also made the body indistinguishable from a lowered one to any
+            // check that scans the emitted text, which is how the L3 gate
+            // initially credited 11 modules of pure scaffolding as real ports.
+            format!(
+                "    // GAP: FunctionBody — body not lowered (flag not guess)\n    todo!(\"py2rust: body of `{name}` not lowered\")\n"
+            )
         }
     };
 
     let sig = if ret_is_unit {
-        format!("fn {name}({}) {{", args_out.join(", "))
+        format!("fn {rs_name}({}) {{", args_out.join(", "))
     } else {
-        format!("fn {name}({}) -> {ret_ty} {{", args_out.join(", "))
+        format!("fn {rs_name}({}) -> {ret_ty} {{", args_out.join(", "))
     };
 
     let mut rust = String::new();
@@ -168,7 +209,12 @@ fn is_pass_only_body(body: &[ast::Stmt]) -> bool {
     body.iter().all(|s| matches!(s, ast::Stmt::Pass(_)))
 }
 
-fn try_lower_simple_body(body: &[ast::Stmt], ret_is_unit: bool) -> Option<String> {
+fn try_lower_simple_body(
+    body: &[ast::Stmt],
+    ret_is_unit: bool,
+    env: &TypeEnv,
+    ret_ty: Option<&str>,
+) -> Option<String> {
     if body.is_empty() {
         return Some(String::new());
     }
@@ -182,7 +228,10 @@ fn try_lower_simple_body(body: &[ast::Stmt], ret_is_unit: bool) -> Option<String
             match r.value.as_deref() {
                 None => return Some(String::new()),
                 Some(expr) => {
-                    let lit = lower_simple_expr(expr)?;
+                    // The return type is the expected type for the whole
+                    // expression — that is what makes `return 3600` from a
+                    // `-> float` lower to `3600.0` rather than to E0308.
+                    let lit = lower_simple_expr_in(expr, env, ret_ty)?;
                     return Some(format!("    {lit}\n"));
                 }
             }
@@ -200,13 +249,85 @@ fn try_lower_simple_body(body: &[ast::Stmt], ret_is_unit: bool) -> Option<String
     None
 }
 
-fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
+/// What is known about the names in scope: parameter name → emitted Rust type.
+///
+/// Only unambiguous scalars are recorded. A parameter whose type was a guess
+/// (`/* dyn */ i32`) is deliberately absent, so inference declines rather than
+/// reasoning from a placeholder.
+pub type TypeEnv = std::collections::HashMap<String, String>;
+
+/// The type an expression *forces*, ignoring anything a literal could adapt to.
+///
+/// The distinction is the whole trick. A bound name has a type it cannot change;
+/// a numeric literal has whichever type its context needs — in Python `48` and
+/// `48.0` are interchangeable, and in Rust the literal can be written either
+/// way. So literals return `None` here, meaning "no opinion", and the expected
+/// type from context is free to decide.
+///
+/// Getting this backwards is not hypothetical: inferring `1 if b else 2` as
+/// `i64` from its two literals made that inference beat the `-> f64` return type
+/// and emitted `if b { 1 } else { 2 }` into a float function.
+///
+/// Exists to answer one question — is this context floating-point? Python
+/// happily writes `window_hours <= 48` where `window_hours` is a float; Rust
+/// requires `48.0`. Found by the L3 gate on `lib/metrics_agg.py`.
+fn forced_ty(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
     match expr {
-        ast::Expr::Constant(c) => constant_to_rust(&c.value),
+        ast::Expr::Name(n) => env.get(n.id.as_str()).cloned(),
+        // Literals adapt. A string literal does not, but nothing here would
+        // coerce one, so treating it as adaptable costs nothing.
+        ast::Expr::Constant(_) => None,
+        // Numeric promotion, one level: if either operand forces float, so does
+        // the result.
+        ast::Expr::BinOp(b) => promote(
+            forced_ty(&b.left, env).as_deref(),
+            forced_ty(&b.right, env).as_deref(),
+        ),
+        // These genuinely produce bool whatever their operands are.
+        ast::Expr::Compare(_) | ast::Expr::BoolOp(_) => Some("bool".into()),
+        ast::Expr::UnaryOp(u) => match u.op {
+            ast::UnaryOp::Not => Some("bool".into()),
+            _ => forced_ty(&u.operand, env),
+        },
+        ast::Expr::IfExp(i) => promote(
+            forced_ty(&i.body, env).as_deref(),
+            forced_ty(&i.orelse, env).as_deref(),
+        ),
+        _ => None,
+    }
+}
+
+/// Combine two operand types. Float wins; otherwise they must agree.
+fn promote(l: Option<&str>, r: Option<&str>) -> Option<String> {
+    match (l, r) {
+        (Some("f64"), _) | (_, Some("f64")) => Some("f64".into()),
+        (Some(a), Some(b)) if a == b => Some(a.into()),
+        // One side unknown: an unknown operand makes the result unknown. Guessing
+        // here would be exactly the silent inference this project refuses.
+        _ => None,
+    }
+}
+
+/// Lower an expression, adjusting *literals* to the expected type.
+///
+/// Literals only. Where a named value's type does not match its context, this
+/// leaves the mismatch alone for `rustc` to reject: inserting a cast would
+/// change what the program does, silently, on a guess. Adjusting a literal
+/// changes nothing — Python's `48` in a float context already *is* `48.0`.
+fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>) -> Option<String> {
+    match expr {
+        ast::Expr::Constant(c) => constant_to_rust_as(&c.value, expected),
         ast::Expr::Name(n) => Some(n.id.to_string()),
         ast::Expr::BinOp(b) => {
-            let left = lower_simple_expr(&b.left)?;
-            let right = lower_simple_expr(&b.right)?;
+            // Both operands share a type in Rust, so settle it once and lower
+            // each side against it.
+            let want = promote(
+                forced_ty(&b.left, env).as_deref(),
+                forced_ty(&b.right, env).as_deref(),
+            )
+            .or_else(|| expected.map(str::to_string));
+            let left = lower_simple_expr_in(&b.left, env, want.as_deref())?;
+            let right = lower_simple_expr_in(&b.right, env, want.as_deref())?;
             let op = match b.op {
                 ast::Operator::Add => "+",
                 ast::Operator::Sub => "-",
@@ -223,7 +344,7 @@ fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
             Some(format!("({left} {op} {right})"))
         }
         ast::Expr::UnaryOp(u) => {
-            let operand = lower_simple_expr(&u.operand)?;
+            let operand = lower_simple_expr_in(&u.operand, env, expected)?;
             match u.op {
                 ast::UnaryOp::UAdd => Some(operand),
                 ast::UnaryOp::USub => Some(format!("(-{operand})")),
@@ -233,8 +354,14 @@ fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
         }
         ast::Expr::Compare(c) => {
             if c.ops.len() == 1 && c.comparators.len() == 1 {
-                let left = lower_simple_expr(&c.left)?;
-                let right = lower_simple_expr(&c.comparators[0])?;
+                // The comparison yields bool, but its two operands must agree
+                // with each other — not with the surrounding expected type.
+                let want = promote(
+                    forced_ty(&c.left, env).as_deref(),
+                    forced_ty(&c.comparators[0], env).as_deref(),
+                );
+                let left = lower_simple_expr_in(&c.left, env, want.as_deref())?;
+                let right = lower_simple_expr_in(&c.comparators[0], env, want.as_deref())?;
                 let op = match c.ops[0] {
                     ast::CmpOp::Eq => "==",
                     ast::CmpOp::NotEq => "!=",
@@ -256,7 +383,7 @@ fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
             };
             let mut parts = Vec::new();
             for val in &b.values {
-                parts.push(lower_simple_expr(val)?);
+                parts.push(lower_simple_expr_in(val, env, Some("bool"))?);
             }
             if parts.is_empty() {
                 None
@@ -265,19 +392,34 @@ fn lower_simple_expr(expr: &ast::Expr) -> Option<String> {
             }
         }
         ast::Expr::IfExp(i) => {
-            let test = lower_simple_expr(&i.test)?;
-            let body = lower_simple_expr(&i.body)?;
-            let orelse = lower_simple_expr(&i.orelse)?;
+            // Both arms are one Rust type. `_bucket_size_seconds` in
+            // tg-agent-relay is exactly this shape: `3600 if h <= 48 else 86400`
+            // returned as a float.
+            let want = promote(
+                forced_ty(&i.body, env).as_deref(),
+                forced_ty(&i.orelse, env).as_deref(),
+            )
+            .or_else(|| expected.map(str::to_string));
+            let test = lower_simple_expr_in(&i.test, env, Some("bool"))?;
+            let body = lower_simple_expr_in(&i.body, env, want.as_deref())?;
+            let orelse = lower_simple_expr_in(&i.orelse, env, want.as_deref())?;
             Some(format!("(if {test} {{ {body} }} else {{ {orelse} }})"))
         }
         _ => None,
     }
 }
 
-fn constant_to_rust(c: &ast::Constant) -> Option<String> {
+/// Render a Python constant as Rust, honouring an expected type for numerics.
+fn constant_to_rust_as(c: &ast::Constant, expected: Option<&str>) -> Option<String> {
     match c {
+        // An int literal in a float context. Python already treats these as
+        // interchangeable; Rust does not, and `48` against an `f64` is E0308.
+        ast::Constant::Int(i) if expected == Some("f64") => Some(format!("{i}.0")),
         ast::Constant::Int(i) => Some(i.to_string()),
-        ast::Constant::Float(f) => Some(format!("{f}")),
+        // `{}` on an f64 drops a whole `.0`: `format!("{}", 1.0f64)` is `"1"`,
+        // which is an *integer* literal in Rust. So `return 1.0` from a `-> f64`
+        // emitted `1` and did not compile. `{:?}` keeps the point.
+        ast::Constant::Float(f) => Some(format!("{f:?}")),
         ast::Constant::Bool(b) => Some(b.to_string()),
         ast::Constant::Str(s) => Some(format!("{:?}", s.as_str())),
         ast::Constant::None => Some("()".into()),

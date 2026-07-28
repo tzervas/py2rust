@@ -13,6 +13,7 @@
 //!   (`Stmt` exhaustiveness rests on a catch-all arm).
 
 pub mod batch;
+pub mod check;
 pub mod dispatch;
 pub mod emit;
 pub mod gap;
@@ -20,7 +21,11 @@ pub mod map;
 pub mod parse;
 pub mod source_loc;
 
-pub use batch::{discover_py_files, transpile_batch, BatchSummary, FileResult, UnionGapReport};
+pub use batch::{
+    discover_py_files, render_priority_report, render_ranked_report, transpile_batch,
+    transpile_batch_with, BatchOptions, BatchSummary, FileResult, UnionGapReport,
+};
+pub use check::{CheckResult, Checker, L3Status, RustcDiag};
 pub use dispatch::{
     analyze_file, analyze_source, dispatch_stmt, transpile_file, transpile_source, DispatchError,
     Outcome,

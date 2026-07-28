@@ -145,6 +145,15 @@ pub struct GapReport {
     pub gaps: Vec<Gap>,
     /// `module.body.len()` — every top-level statement, including those only gapped.
     pub total_top_level_items: usize,
+    /// Every statement in the module, nested ones included — the **L2 denominator**.
+    ///
+    /// `total_top_level_items` is the L1 denominator and flatters the result by
+    /// roughly 5x on real code, because ~82% of statements live inside bodies.
+    /// Defaulted for compatibility with sidecars written before L2 existed; a 0
+    /// here means **not measured**, not "no statements", and `statement_fraction`
+    /// returns `None` rather than 0.0 so the two cannot be confused.
+    #[serde(default)]
+    pub total_statements: usize,
 }
 
 fn default_schema_version() -> u32 {
@@ -159,7 +168,34 @@ impl GapReport {
             emitted_items: Vec::new(),
             gaps: Vec::new(),
             total_top_level_items,
+            total_statements: 0,
         }
+    }
+
+    /// Record the L2 denominator. Separate from `new` so older callers keep
+    /// compiling and simply report "not measured".
+    pub fn with_total_statements(mut self, n: usize) -> Self {
+        self.total_statements = n;
+        self
+    }
+
+    /// Statements for which Rust was emitted.
+    ///
+    /// One per emitted top-level item: a `def` whose signature lowered but whose
+    /// body did not contributes exactly **one** statement, not its whole body.
+    /// That is the entire difference between L1 and L2.
+    pub fn lowered_statement_count(&self) -> usize {
+        self.emitted_items.len()
+    }
+
+    /// **L2** — lowered statements over *all* statements. `None` when the
+    /// denominator was never measured, so an unmeasured report cannot be read as
+    /// 0% coverage.
+    pub fn statement_fraction(&self) -> Option<f64> {
+        if self.total_statements == 0 {
+            return None;
+        }
+        Some(self.lowered_statement_count() as f64 / self.total_statements as f64)
     }
 
     pub fn denominator_excluded_count(&self) -> usize {

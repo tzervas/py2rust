@@ -59,7 +59,10 @@ pub fn transpile_source(
     })?;
 
     let total = module.body.len();
-    let mut report = GapReport::new(file_label, total);
+    // L1 counts top-level items; L2 counts every statement, nested included.
+    // Both are recorded so the distance between them stays visible.
+    let total_stmts = crate::parse::count_statements(&module.body);
+    let mut report = GapReport::new(file_label, total).with_total_statements(total_stmts);
     let mut chunks: Vec<String> = Vec::new();
 
     let mod_name = module_name.unwrap_or_else(|| {
