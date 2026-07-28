@@ -48,16 +48,17 @@ jobs:
   trivy-fs:
     name: trivy filesystem (vuln+secret+license)
     runs-on: [self-hosted, linux, x64, podman]
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Trivy fs
         run: |
           set -euo pipefail
-          if ! command -v trivy >/dev/null 2>&1; then
-            echo "trivy missing — advisory skip (continue-on-error)"
-            exit 0
-          fi
+          # Prefer preinstalled trivy from runner image (ap-workflows runner-base).
+          # Missing tool must be RED — never silent green / advisory skip.
+          command -v trivy >/dev/null 2>&1 || {
+            echo "trivy missing from runner image" >&2
+            exit 1
+          }
           trivy fs --scanners vuln,secret,license \
             --severity HIGH,CRITICAL \
             --skip-dirs .git --skip-dirs target --skip-dirs node_modules --skip-dirs .venv \
