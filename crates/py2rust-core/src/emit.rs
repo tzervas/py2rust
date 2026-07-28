@@ -717,10 +717,8 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&i.orelse, fname, out);
         }
         ast::Expr::Dict(d) => {
-            for key in &d.keys {
-                if let Some(k) = key {
-                    walk_expr(k, fname, out);
-                }
+            for k in d.keys.iter().flatten() {
+                walk_expr(k, fname, out);
             }
             for val in &d.values {
                 walk_expr(val, fname, out);

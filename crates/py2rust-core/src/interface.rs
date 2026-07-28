@@ -149,11 +149,7 @@ pub struct MycForm {
 
 impl MycForm {
     /// Construct a form with explicit authority and guarantee.
-    pub fn new(
-        surface: impl Into<String>,
-        authority: Citation,
-        guarantee: Guarantee,
-    ) -> Self {
+    pub fn new(surface: impl Into<String>, authority: Citation, guarantee: Guarantee) -> Self {
         Self {
             surface: surface.into(),
             authority,

@@ -40,8 +40,6 @@ pub use dispatch::{
     Outcome,
 };
 pub use gap::{gap_json_path, Category, Gap, GapReason, GapReport, GAP_SCHEMA_VERSION};
-pub use interface::{
-    taxonomy_constructs, Citation, Guarantee, MapOutcome, MycForm, PyConstruct,
-};
+pub use interface::{taxonomy_constructs, Citation, Guarantee, MapOutcome, MycForm, PyConstruct};
 pub use myc_map::{honesty_violations, map_construct, map_taxonomy, taxonomy_coverage};
 pub use parse::{parse_file, parse_source, ParseFail, ParsedModule};

@@ -85,10 +85,7 @@ fn s3_every_mapped_row_cited_or_unverified() {
         }
     }
     let violations = honesty_violations();
-    assert!(
-        violations.is_empty(),
-        "honesty violations: {violations:?}"
-    );
+    assert!(violations.is_empty(), "honesty violations: {violations:?}");
 }
 
 #[test]
@@ -167,11 +164,13 @@ fn multistmt_maps_to_nested_let_in_not_block_claim() {
 
 #[test]
 fn class_and_async_are_explicit_unmappable() {
-    for c in [PyConstruct::Class, PyConstruct::Async, PyConstruct::DynamicTyping] {
+    for c in [
+        PyConstruct::Class,
+        PyConstruct::Async,
+        PyConstruct::DynamicTyping,
+    ] {
         match map_construct(&c) {
-            MapOutcome::Unmappable {
-                reason, needed, ..
-            } => {
+            MapOutcome::Unmappable { reason, needed, .. } => {
                 assert!(!reason.is_empty());
                 assert!(
                     needed.as_ref().map(|s| !s.is_empty()).unwrap_or(false),

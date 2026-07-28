@@ -197,9 +197,7 @@ pub fn honesty_violations() -> Vec<String> {
                     }
                 }
             }
-            MapOutcome::Unmappable {
-                reason, needed, ..
-            } => {
+            MapOutcome::Unmappable { reason, needed, .. } => {
                 if reason.trim().is_empty() {
                     v.push(format!("{construct}: Unmappable with empty reason"));
                 }

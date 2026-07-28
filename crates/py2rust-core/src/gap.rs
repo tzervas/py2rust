@@ -113,9 +113,7 @@ impl Category {
             Category::MultiStmtBody => PyConstruct::MultiStmtBody,
             // Partial-emit sub-gap: signature out, body not fully lowered.
             Category::FunctionBody => PyConstruct::PartialEmit,
-            Category::Other => PyConstruct::Other(
-                other_label.unwrap_or("").to_string(),
-            ),
+            Category::Other => PyConstruct::Other(other_label.unwrap_or("").to_string()),
         }
     }
 
