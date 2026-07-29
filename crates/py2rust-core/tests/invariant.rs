@@ -298,9 +298,30 @@ fn gap_json_schema_stable_keys() {
 }
 
 #[test]
+fn multi_stmt_assign_return_lowers() {
+    // Multi-statement bodies of assign+return are now lowered (L2 progress).
+    let src = "def complex(a: int) -> int:\n    x = a + 1\n    y = x * 2\n    return y\n";
+    let (report, rust) = transpile_source(src, "complex.py", None).unwrap();
+    assert!(report.emitted_items.contains(&"complex".into()));
+    assert!(
+        rust.contains("let x =") && rust.contains("let y ="),
+        "expected multi-stmt lowering, got:\n{rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "fully lowered multi-stmt body must not carry FunctionBody: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
 fn no_silent_function_body_todo_without_gap() {
     // Any emitted fn whose body is not lowered must carry FunctionBody gap.
-    let src = "def complex(a: int) -> int:\n    x = a + 1\n    y = x * 2\n    return y\n";
+    // Uses a call we do not lower (`print`) so the body is forced to decline.
+    let src = "def complex(a: int) -> int:\n    print(a)\n    return a\n";
     let (report, rust) = transpile_source(src, "complex.py", None).unwrap();
     assert!(report.emitted_items.contains(&"complex".into()));
     assert!(
@@ -313,6 +334,53 @@ fn no_silent_function_body_todo_without_gap() {
             .iter()
             .any(|g| g.category == Category::FunctionBody),
         "FunctionBody gap required when body not lowered: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn if_else_and_typing_import_erase() {
+    let src = r#"
+from typing import Optional
+import typing
+
+def clamp(x: int, lo: int, hi: int) -> int:
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+def double_list(xs: list[int]) -> list[int]:
+    return xs
+"#;
+    let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
+    assert!(
+        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        "typing imports should erase: {:?}",
+        report.emitted_items
+    );
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::Import),
+        "erasable imports must not leave Import gaps: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("fn clamp") && rust.contains("if (x < lo)"),
+        "if/else should lower:\n{rust}"
+    );
+    assert!(
+        rust.contains("fn double_list") && rust.contains("Vec<i64>"),
+        "list[int] should map:\n{rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| {
+                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+            }),
+        "clamp should lower: {:?}",
         report.gaps
     );
 }
