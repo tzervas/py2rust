@@ -1,0 +1,388 @@
+# Point this at a Python repo or a PyPI package and get back a transpile
+# analysis, on a per-project branch that accumulates across runs.
+#
+# Manual dispatch only, deliberately. Each run costs real time and the corpus
+# is chosen, not swept -- selective dispatch is the whole point.
+#
+# BRANCH RESOLUTION
+# The target name is normalised (PEP 503) into `corpus/<slug>`. If that branch
+# already exists it is reused as the head so runs accumulate; otherwise it is
+# created from `base`. `branch_override` wins over both, for when the guess is
+# wrong -- which is why it is an input rather than a convention.
+#
+# CREDENTIAL SPLIT
+# `analyze` fetches third-party source and runs `py2rust batch` over it, which
+# only PARSES Python -- it never executes it. `report` is the only job holding
+# `contents: write`. They are separate jobs so that when L4 lands (running the
+# package's own test suite, which IS untrusted execution) the boundary already
+# exists and does not have to be retrofitted under pressure.
+#
+# PyPI fetch goes through the JSON API and extracts the sdist directly. NOT
+# `pip download`: that can execute setup.py during metadata generation, which
+# would be arbitrary code execution in a job that holds a token.
+#
+# NO HEREDOCS. A column-0 terminator inside `run: |` ends the YAML scalar and
+# turns the workflow into a silent startup_failure -- fleet-ops #8, dev-mcp #18.
+# Everything below uses printf and jq.
+name: transpile-corpus
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Git URL, owner/repo, or PyPI package name'
+        type: string
+        required: true
+      branch_override:
+        description: 'Use this branch instead of the auto-resolved corpus/<slug>'
+        type: string
+        required: false
+      base:
+        description: 'Base branch for a NEW corpus branch'
+        type: string
+        default: dev
+      source_kind:
+        description: 'Where to fetch the target from (auto prefers a GitHub release over PyPI)'
+        type: choice
+        options: [auto, github-release, git, gitlab, pypi]
+        default: auto
+      allow_unsafe:
+        description: 'Proceed even if the build-script safety scan flags something'
+        type: boolean
+        default: false
+      skip_l3:
+        description: 'Skip the L3 compile gate (faster; the report can then only claim what was emitted, not that it builds)'
+        type: boolean
+        default: false
+      grok_eval:
+        description: 'Also queue a grok evaluation of the output (judgement only, never ground truth)'
+        type: boolean
+        default: false
+
+# Default to nothing; each job opts in to what it needs.
+permissions: {}
+
+jobs:
+  resolve:
+    name: resolve target and branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      slug: ${{ steps.r.outputs.slug }}
+      branch: ${{ steps.r.outputs.branch }}
+      existed: ${{ steps.r.outputs.existed }}
+      kind: ${{ steps.r.outputs.kind }}
+      fetch_ref: ${{ steps.r.outputs.fetch_ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve
+        id: r
+        env:
+          TARGET: ${{ inputs.target }}
+          OVERRIDE: ${{ inputs.branch_override }}
+          KIND_IN: ${{ inputs.source_kind }}
+        run: |
+          set -euo pipefail
+
+          # Source preference: a GitHub (or GitLab) release or tag beats a PyPI
+          # sdist. Both are third-party code, but PyPI has the worse
+          # supply-chain history, and a released tarball is attached to a
+          # reviewable tag in a repository with history -- an sdist is whatever
+          # the uploader chose to upload.
+          KIND="$KIND_IN"
+          if [ "$KIND" = "auto" ]; then
+            case "$TARGET" in
+              *gitlab.com*|*gitlab.*) KIND="gitlab" ;;
+              http://*|https://*|git@*|*.git) KIND="git" ;;
+              */*) KIND="github-release" ;;
+              *) KIND="pypi" ;;
+            esac
+          fi
+
+          # Slug: PEP 503 normalisation for pypi (lowercase, runs of -_. to -),
+          # owner-repo elsewhere so two projects named "utils" cannot collide.
+          slugify_path() {
+            printf '%s' "$1" | tr '[:upper:]/' '[:lower:]-' \
+              | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-|-$//g'
+          }
+          strip_host() {
+            printf '%s' "$1" | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##'
+          }
+
+          case "$KIND" in
+            pypi)
+              SLUG="$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed -E 's/[-_.]+/-/g')"
+              FETCH="$TARGET"
+              ;;
+            github-release|git)
+              STRIPPED="$(strip_host "$TARGET")"
+              SLUG="$(slugify_path "$STRIPPED")"
+              case "$TARGET" in
+                http://*|https://*|git@*) FETCH="$TARGET" ;;
+                *) FETCH="$STRIPPED" ;;
+              esac
+              ;;
+            gitlab)
+              STRIPPED="$(strip_host "$TARGET")"
+              SLUG="gl-$(slugify_path "$STRIPPED")"
+              FETCH="$STRIPPED"
+              ;;
+          esac
+
+          if [ -z "$SLUG" ]; then
+            echo "::error::could not derive a slug from '$TARGET'"; exit 1
+          fi
+
+          BRANCH="corpus/$SLUG"
+          if [ -n "${OVERRIDE:-}" ]; then
+            BRANCH="$OVERRIDE"
+            echo "::notice::branch overridden to $BRANCH"
+          fi
+
+          # Does the head already exist? Reuse it so runs accumulate.
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            EXISTED=true
+          else
+            EXISTED=false
+          fi
+
+          printf 'kind=%s\n' "$KIND" >> "$GITHUB_OUTPUT"
+          printf 'slug=%s\n' "$SLUG" >> "$GITHUB_OUTPUT"
+          printf 'branch=%s\n' "$BRANCH" >> "$GITHUB_OUTPUT"
+          printf 'existed=%s\n' "$EXISTED" >> "$GITHUB_OUTPUT"
+          printf 'fetch_ref=%s\n' "$FETCH" >> "$GITHUB_OUTPUT"
+
+          printf '%s\n' "resolved:" "  target : $TARGET" "  kind   : $KIND" \
+            "  slug   : $SLUG" "  branch : $BRANCH (existed=$EXISTED)" "  fetch  : $FETCH"
+
+  analyze:
+    name: fetch and analyze
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Read only. This job touches third-party source; it must never be able to
+    # write to the repository, and it holds no secrets.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build py2rust
+        run: cargo build --release -p py2rust
+
+      - name: Fetch target
+        env:
+          KIND: ${{ needs.resolve.outputs.kind }}
+          FETCH: ${{ needs.resolve.outputs.fetch_ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p corpus-src/target
+          untar() { tar -xzf "$1" -C corpus-src/target --strip-components=1; }
+
+          case "$KIND" in
+            github-release)
+              # Prefer the latest release tarball; fall back to the default
+              # branch tarball if the project cuts no releases. Both come from
+              # the repository rather than an independently uploaded artifact.
+              REL="$(curl -fsSL "https://api.github.com/repos/${FETCH}/releases/latest" 2>/dev/null \
+                     | jq -r '.tarball_url // empty')"
+              if [ -n "$REL" ]; then
+                printf 'source: github release %s\n' "$REL"
+                curl -fsSL -o /tmp/pkg.tar.gz "$REL"
+              else
+                printf 'source: github default branch (no releases published)\n'
+                curl -fsSL -o /tmp/pkg.tar.gz "https://api.github.com/repos/${FETCH}/tarball"
+              fi
+              untar /tmp/pkg.tar.gz
+              ;;
+            gitlab)
+              ENC="$(printf '%s' "$FETCH" | jq -sRr @uri)"
+              printf 'source: gitlab %s\n' "$FETCH"
+              curl -fsSL -o /tmp/pkg.tar.gz \
+                "https://gitlab.com/api/v4/projects/${ENC}/repository/archive.tar.gz"
+              untar /tmp/pkg.tar.gz
+              ;;
+            git)
+              printf 'source: git clone %s\n' "$FETCH"
+              rmdir corpus-src/target
+              git clone --depth 1 --quiet "$FETCH" corpus-src/target
+              ;;
+            pypi)
+              # PyPI JSON API + direct sdist extraction. NOT `pip download`,
+              # which can execute setup.py during metadata generation.
+              URL="$(curl -fsSL "https://pypi.org/pypi/${FETCH}/json" \
+                     | jq -r '[.urls[] | select(.packagetype=="sdist")][0].url // empty')"
+              if [ -z "$URL" ]; then
+                echo "::error::no sdist found for '$FETCH' on PyPI"; exit 1
+              fi
+              printf 'source: pypi sdist %s\n' "$URL"
+              printf '::warning::PyPI sdist used. An sdist is whatever the uploader chose to upload; a GitHub release is attached to a reviewable tag. Prefer owner/repo where one exists.\n'
+              curl -fsSL -o /tmp/pkg.tar.gz "$URL"
+              untar /tmp/pkg.tar.gz
+              ;;
+          esac
+          printf 'python files: %s\n' "$(find corpus-src/target -name '*.py' | wc -l)"
+
+      - name: Build-script safety scan
+        env:
+          ALLOW: ${{ inputs.allow_unsafe }}
+        run: |
+          set -uo pipefail
+          # This job only PARSES Python, so nothing here executes. The scan
+          # exists because L4 will execute it, and because a package whose
+          # build scripts fetch and decode blobs is worth knowing about before
+          # it reaches a runner that can run it.
+          #
+          # Scoped to build/config entry points -- the files a package manager
+          # executes without being asked. Flagging network calls across an
+          # entire library would be noise; flagging them in setup.py is signal.
+          FINDINGS=0
+          for f in setup.py setup.cfg pyproject.toml conftest.py; do
+            p="corpus-src/target/$f"
+            [ -f "$p" ] || continue
+            while IFS= read -r pat; do
+              if grep -nE "$pat" "$p" >/dev/null 2>&1; then
+                printf '::warning file=%s::matches %s\n' "$f" "$pat"
+                grep -nE "$pat" "$p" | head -3 | sed 's/^/      /'
+                FINDINGS=$((FINDINGS + 1))
+              fi
+            done < .github/build-script-red-flags.txt
+          done
+          printf 'safety scan: %d finding(s)\n' "$FINDINGS"
+          if [ "$FINDINGS" -gt 0 ] && [ "$ALLOW" != "true" ]; then
+            printf '::error::build scripts matched %d red flag(s). Review above. Re-run with allow_unsafe=true to proceed anyway.\n' "$FINDINGS"
+            exit 1
+          fi
+
+      - name: Run batch analysis
+        env:
+          SKIP_L3: ${{ inputs.skip_l3 }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # L3 hands every emitted module to rustc. It is on by default because
+          # emitted-but-uncompilable Rust counts as emitted in every other
+          # figure, so a report without L3 states coverage it cannot back.
+          L3ARG=""
+          if [ "$SKIP_L3" = "true" ]; then
+            L3ARG="--no-l3"
+            printf '::warning::L3 compile gate skipped — this report does not claim the output builds\n'
+          fi
+          ./target/release/py2rust batch corpus-src/target \
+            --out out/artifacts --report out/corpus-report.md $L3ARG
+          printf '\n--- report head ---\n'
+          head -40 out/corpus-report.md
+
+      - name: Strip generated sources, keep the analysis
+        run: |
+          set -euo pipefail
+          # The .rs output can be large and is reproducible from the inputs;
+          # the reports are what accumulate on the branch.
+          find out/artifacts -name '*.rs' -delete
+          du -sh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: analysis-${{ needs.resolve.outputs.slug }}
+          path: out
+          retention-days: 30
+
+  report:
+    name: commit analysis to the corpus branch
+    needs: [resolve, analyze]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job with write access, and it never executes third-party code --
+    # it consumes the previous job's output as inert data.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: analysis-${{ needs.resolve.outputs.slug }}
+          path: incoming
+
+      - name: Commit onto the corpus branch
+        env:
+          BRANCH: ${{ needs.resolve.outputs.branch }}
+          EXISTED: ${{ needs.resolve.outputs.existed }}
+          BASE: ${{ inputs.base }}
+          SLUG: ${{ needs.resolve.outputs.slug }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$EXISTED" = "true" ]; then
+            git fetch origin "$BRANCH" --depth=1
+            git checkout -B "$BRANCH" "origin/$BRANCH"
+          else
+            git fetch origin "$BASE" --depth=1
+            git checkout -B "$BRANCH" "origin/$BASE"
+          fi
+
+          DEST="corpus/$SLUG"
+          mkdir -p "$DEST"
+          rm -rf "$DEST/artifacts"
+          cp -r incoming/. "$DEST/"
+
+          # Deltas are the point: an unchanged run should produce no commit, so
+          # re-running over a corpus stays cheap and the history means something.
+          git add -A "$DEST"
+          if git diff --cached --quiet; then
+            echo "::notice::no change since the last run — nothing to commit"
+            exit 0
+          fi
+
+          {
+            printf 'analysis: %s\n\n' "$SLUG"
+            printf 'target: %s\n' "$TARGET"
+            printf 'run:    %s/%s/actions/runs/%s\n' \
+              "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf '\nGenerated by transpile-corpus. Analysis only — no generated\n'
+            printf 'sources, and nothing here was executed.\n'
+          } > /tmp/msg.txt
+          git commit -q -F /tmp/msg.txt
+          git push origin "$BRANCH"
+          printf 'pushed to %s\n' "$BRANCH"
+
+  grok_eval:
+    name: grok evaluation (judgement only)
+    needs: [resolve, analyze]
+    if: ${{ inputs.grok_eval }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: analysis-${{ needs.resolve.outputs.slug }}
+          path: incoming
+      - name: Placeholder
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'grok evaluation is not wired up yet.' \
+            '' \
+            'When it is, it produces JUDGEMENT ONLY -- is this idiomatic, what' \
+            'would a reviewer object to -- and never ground truth. Whether the' \
+            'output compiles and passes is decided by L3/L4 in the verify job,' \
+            'not here. Keeping those separate is deliberate: conflating them' \
+            'lets an opinion stand in for a measurement.'
+          ls -la incoming

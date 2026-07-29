@@ -3,7 +3,16 @@
 //! Shape ported from `research/mycelium-transpile-snapshot/src/gap.rs`, with
 //! **Python-specific** categories. Every construct the driver cannot (or will not)
 //! lower is recorded here — never dropped silently.
+//!
+//! # Python → Mycelium bridge
+//!
+//! [`Category`] stays the driver's gap taxonomy. The pre-planned mapping
+//! alphabet [`crate::interface::PyConstruct`] mirrors it 1:1 (with
+//! `FunctionBody` ↔ `PartialEmit`). Conversions live here so the gap layer
+//! cannot fork from the map interface (gap-closer lane only).
 
+use crate::interface::{MapOutcome, PyConstruct};
+use crate::myc_map;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,6 +86,75 @@ impl std::fmt::Display for Category {
     }
 }
 
+/// Bridge: gap [`Category`] → mapping-alphabet [`PyConstruct`].
+///
+/// `FunctionBody` (partial emit sub-gap) maps to [`PyConstruct::PartialEmit`].
+/// `Other` maps to [`PyConstruct::Other`] with an empty label; callers that have
+/// a free-text reason should use [`Category::to_py_construct_with_label`].
+impl From<Category> for PyConstruct {
+    fn from(c: Category) -> Self {
+        c.to_py_construct_with_label(None)
+    }
+}
+
+impl Category {
+    /// Convert to [`PyConstruct`], optionally attaching a free-text label for
+    /// [`Category::Other`] / open-ended reasons.
+    pub fn to_py_construct_with_label(self, other_label: Option<&str>) -> PyConstruct {
+        match self {
+            Category::Class => PyConstruct::Class,
+            Category::Exception => PyConstruct::Exception,
+            Category::DynamicTyping => PyConstruct::DynamicTyping,
+            Category::Metaprogramming => PyConstruct::Metaprogramming,
+            Category::Async => PyConstruct::Async,
+            Category::Import => PyConstruct::Import,
+            Category::Lambda => PyConstruct::Lambda,
+            Category::Comprehension => PyConstruct::Comprehension,
+            Category::MultiStmtBody => PyConstruct::MultiStmtBody,
+            // Partial-emit sub-gap: signature out, body not fully lowered.
+            Category::FunctionBody => PyConstruct::PartialEmit,
+            Category::Other => PyConstruct::Other(other_label.unwrap_or("").to_string()),
+        }
+    }
+
+    /// Look up the Mycelium-native [`MapOutcome`] for this gap category.
+    ///
+    /// Total: always Mapped or Unmappable (via [`myc_map::map_construct`]).
+    pub fn myc_map_outcome(self) -> MapOutcome {
+        let construct = PyConstruct::from(self);
+        myc_map::map_construct(&construct)
+    }
+}
+
+/// Bridge: [`PyConstruct`] → gap [`Category`].
+///
+/// [`PyConstruct::PartialEmit`] → [`Category::FunctionBody`].
+/// [`PyConstruct::Other(_)`] → [`Category::Other`] (label is not stored on
+/// `Category`; keep it on the gap `reason` / construct payload).
+impl From<&PyConstruct> for Category {
+    fn from(c: &PyConstruct) -> Self {
+        match c {
+            PyConstruct::Class => Category::Class,
+            PyConstruct::Exception => Category::Exception,
+            PyConstruct::DynamicTyping => Category::DynamicTyping,
+            PyConstruct::Metaprogramming => Category::Metaprogramming,
+            PyConstruct::Async => Category::Async,
+            PyConstruct::Import => Category::Import,
+            PyConstruct::Lambda => Category::Lambda,
+            PyConstruct::Comprehension => Category::Comprehension,
+            PyConstruct::MultiStmtBody => Category::MultiStmtBody,
+            PyConstruct::PartialEmit => Category::FunctionBody,
+            PyConstruct::Other(_) => Category::Other,
+        }
+    }
+}
+
+impl From<PyConstruct> for Category {
+    fn from(c: PyConstruct) -> Self {
+        Category::from(&c)
+    }
+}
+
 /// One construct this transpiler could not (or would not) fully lower to Rust.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Gap {
@@ -113,6 +191,23 @@ impl Gap {
             item_name,
         }
     }
+
+    /// The mapping-alphabet construct for this gap (aligned with
+    /// [`Gap::category`] / [`Gap::python_construct`]).
+    pub fn py_construct(&self) -> PyConstruct {
+        // Prefer gap reason as Other label when category is Other.
+        let label = if self.category == Category::Other {
+            Some(self.reason.as_str())
+        } else {
+            None
+        };
+        self.category.to_py_construct_with_label(label)
+    }
+
+    /// Mycelium-native map outcome for this gap's construct.
+    pub fn myc_map_outcome(&self) -> MapOutcome {
+        myc_map::map_construct(&self.py_construct())
+    }
 }
 
 /// Internal helper carrying category + reason before a full [`Gap`] is materialised.
@@ -145,6 +240,15 @@ pub struct GapReport {
     pub gaps: Vec<Gap>,
     /// `module.body.len()` — every top-level statement, including those only gapped.
     pub total_top_level_items: usize,
+    /// Every statement in the module, nested ones included — the **L2 denominator**.
+    ///
+    /// `total_top_level_items` is the L1 denominator and flatters the result by
+    /// roughly 5x on real code, because ~82% of statements live inside bodies.
+    /// Defaulted for compatibility with sidecars written before L2 existed; a 0
+    /// here means **not measured**, not "no statements", and `statement_fraction`
+    /// returns `None` rather than 0.0 so the two cannot be confused.
+    #[serde(default)]
+    pub total_statements: usize,
 }
 
 fn default_schema_version() -> u32 {
@@ -159,7 +263,40 @@ impl GapReport {
             emitted_items: Vec::new(),
             gaps: Vec::new(),
             total_top_level_items,
+            total_statements: 0,
         }
+    }
+
+    /// Record the L2 denominator. Separate from `new` so older callers keep
+    /// compiling and simply report "not measured".
+    pub fn with_total_statements(mut self, n: usize) -> Self {
+        self.total_statements = n;
+        self
+    }
+
+    /// Statements for which Rust was emitted.
+    ///
+    /// One per emitted top-level item: a `def` whose signature lowered but whose
+    /// body did not contributes exactly **one** statement, not its whole body.
+    /// That is the entire difference between L1 and L2.
+    ///
+    /// Synthetic `#erase:…` witnesses (erasable imports) are excluded — they
+    /// exist only so never-silent holds when a top-level import leaves no Rust.
+    pub fn lowered_statement_count(&self) -> usize {
+        self.emitted_items
+            .iter()
+            .filter(|n| !n.starts_with("#erase:"))
+            .count()
+    }
+
+    /// **L2** — lowered statements over *all* statements. `None` when the
+    /// denominator was never measured, so an unmeasured report cannot be read as
+    /// 0% coverage.
+    pub fn statement_fraction(&self) -> Option<f64> {
+        if self.total_statements == 0 {
+            return None;
+        }
+        Some(self.lowered_statement_count() as f64 / self.total_statements as f64)
     }
 
     pub fn denominator_excluded_count(&self) -> usize {
@@ -169,10 +306,17 @@ impl GapReport {
             .count()
     }
 
-    /// Translatable-surface denominator: total top-level minus excluded categories.
+    /// Translatable-surface denominator: total top-level minus excluded categories
+    /// and synthetic erase witnesses (erasable imports).
     pub fn non_excluded_item_count(&self) -> usize {
+        let erased = self
+            .emitted_items
+            .iter()
+            .filter(|n| n.starts_with("#erase:"))
+            .count();
         self.total_top_level_items
             .saturating_sub(self.denominator_excluded_count())
+            .saturating_sub(erased)
     }
 
     /// Fraction of non-excluded top-level items for which some Rust text was emitted.
@@ -182,7 +326,7 @@ impl GapReport {
         if denom == 0 {
             return 0.0;
         }
-        self.emitted_items.len() as f64 / denom as f64
+        self.lowered_statement_count() as f64 / denom as f64
     }
 
     pub fn category_counts(&self) -> BTreeMap<&'static str, usize> {
@@ -240,10 +384,7 @@ impl GapReport {
 
 /// Compute `<stem>.gap.json` path for a source or output file.
 pub fn gap_json_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("out");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.join(format!("{stem}.gap.json")),
         _ => PathBuf::from(format!("{stem}.gap.json")),

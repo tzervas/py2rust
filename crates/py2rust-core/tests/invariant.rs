@@ -85,6 +85,86 @@ fn simple_fn_emits_typed_functions() {
 }
 
 #[test]
+fn nested_constructs_deeply_scanned_recursively() {
+    // We should correctly scan deep inside If, For, etc. inside a function body.
+    let src = r#"
+def my_complex_fn(x: int) -> int:
+    if x > 10:
+        for i in range(x):
+            try:
+                print(lambda: i)
+                exec("y = 1")
+            except Exception:
+                pass
+    return x
+"#;
+    let (report, _rust) = transpile_source(src, "nested.py", None).unwrap();
+    let categories: BTreeSet<_> = report.gaps.iter().map(|g| g.category).collect();
+
+    assert!(
+        categories.contains(&Category::Exception),
+        "Expected Exception gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        categories.contains(&Category::Lambda),
+        "Expected Lambda gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        categories.contains(&Category::Metaprogramming),
+        "Expected Metaprogramming gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn test_comparison_boolean_ternary_lowering() {
+    let src = r#"
+def is_equal(x: int, y: int) -> bool:
+    return x == y
+
+def logical_or(a: bool, b: bool) -> bool:
+    return a or b
+
+def ternary_expr(x: int) -> int:
+    return 1 if x > 0 else 0
+"#;
+    let (report, rust) = transpile_source(src, "expr_tests.py", None).unwrap();
+    assert_eq!(report.emitted_items.len(), 3);
+    assert!(
+        report.gaps.is_empty(),
+        "expected no gaps for supported logical and comparison expressions, got: {:?}",
+        report.gaps
+    );
+
+    assert!(rust.contains("fn is_equal"), "Expected is_equal: {}", rust);
+    assert!(
+        rust.contains("(x == y)"),
+        "Expected == comparison: {}",
+        rust
+    );
+
+    assert!(
+        rust.contains("fn logical_or"),
+        "Expected logical_or: {}",
+        rust
+    );
+    assert!(rust.contains("(a || b)"), "Expected logical or: {}", rust);
+
+    assert!(
+        rust.contains("fn ternary_expr"),
+        "Expected ternary_expr: {}",
+        rust
+    );
+    assert!(
+        rust.contains("(if (x > 0) { 1 } else { 0 })"),
+        "Expected ternary conditional: {}",
+        rust
+    );
+}
+
+#[test]
 fn class_only_produces_class_gaps() {
     let (label, source) = fixture("class_only.py");
     let report = analyze_source(&source, &label).unwrap();
@@ -218,9 +298,30 @@ fn gap_json_schema_stable_keys() {
 }
 
 #[test]
+fn multi_stmt_assign_return_lowers() {
+    // Multi-statement bodies of assign+return are now lowered (L2 progress).
+    let src = "def complex(a: int) -> int:\n    x = a + 1\n    y = x * 2\n    return y\n";
+    let (report, rust) = transpile_source(src, "complex.py", None).unwrap();
+    assert!(report.emitted_items.contains(&"complex".into()));
+    assert!(
+        rust.contains("let x =") && rust.contains("let y ="),
+        "expected multi-stmt lowering, got:\n{rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "fully lowered multi-stmt body must not carry FunctionBody: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
 fn no_silent_function_body_todo_without_gap() {
     // Any emitted fn whose body is not lowered must carry FunctionBody gap.
-    let src = "def complex(a: int) -> int:\n    x = a + 1\n    y = x * 2\n    return y\n";
+    // Uses a call we do not lower (`print`) so the body is forced to decline.
+    let src = "def complex(a: int) -> int:\n    print(a)\n    return a\n";
     let (report, rust) = transpile_source(src, "complex.py", None).unwrap();
     assert!(report.emitted_items.contains(&"complex".into()));
     assert!(
@@ -233,6 +334,53 @@ fn no_silent_function_body_todo_without_gap() {
             .iter()
             .any(|g| g.category == Category::FunctionBody),
         "FunctionBody gap required when body not lowered: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn if_else_and_typing_import_erase() {
+    let src = r#"
+from typing import Optional
+import typing
+
+def clamp(x: int, lo: int, hi: int) -> int:
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+def double_list(xs: list[int]) -> list[int]:
+    return xs
+"#;
+    let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
+    assert!(
+        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        "typing imports should erase: {:?}",
+        report.emitted_items
+    );
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::Import),
+        "erasable imports must not leave Import gaps: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("fn clamp") && rust.contains("if (x < lo)"),
+        "if/else should lower:\n{rust}"
+    );
+    assert!(
+        rust.contains("fn double_list") && rust.contains("Vec<i64>"),
+        "list[int] should map:\n{rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| {
+                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+            }),
+        "clamp should lower: {:?}",
         report.gaps
     );
 }

@@ -30,6 +30,19 @@
 4. **Declared emission**: text in `.rs` is heuristic until a vet pass proves otherwise.
 5. **Denominator honesty**: only exclude categories that are truly non-surface (none for Python MVP).
 
+## Python → Mycelium-native map (this tree)
+
+Beyond the Rust emission path, `interface` + `myc_map` record the **correct
+Mycelium way** for each Python gap category (or an explicit Unmappable refusal).
+Rust is the reference for the research snapshot, not the pipeline route.
+
+- Contract: [`crates/py2rust-core/src/interface.rs`](../crates/py2rust-core/src/interface.rs)
+- Table: [`crates/py2rust-core/src/myc_map.rs`](../crates/py2rust-core/src/myc_map.rs)
+- Doc: [`docs/PY2MYC_MAP.md`](PY2MYC_MAP.md)
+
+`Category::FunctionBody` bridges to `PyConstruct::PartialEmit`. Coverage =
+`Mapped / (Mapped + Unmappable)` over the closed taxonomy.
+
 ## Provenance
 
 See [`research/mycelium-transpile-snapshot/PROVENANCE.md`](../research/mycelium-transpile-snapshot/PROVENANCE.md).

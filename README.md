@@ -75,7 +75,9 @@ crates/
   py2rust/        # CLI (clap): version, analyze, transpile
   py2rust-core/   # library
     parse/        # rustpython-parser
-    gap/          # Category, Gap, GapReport, serde JSON
+    gap/          # Category, Gap, GapReport, serde JSON (+ PyConstruct bridge)
+    interface/    # PyConstruct, MycForm, Guarantee, Citation, MapOutcome
+    myc_map/      # Python construct → Mycelium-native MapOutcome table
     dispatch/     # never-silent walk of module body
     emit/         # best-effort Rust for simple typed defs
     batch/        # multi-file + summary.json + union.gap.json
@@ -83,6 +85,9 @@ research/         # mycelium-transpile snapshot (read-only)
 ```
 
 **Pipeline:** Python source → parse → dispatch (emit | gap | both) → `.rs` + `.gap.json`
+
+**Mycelium map:** every gap category also resolves to a Mycelium-native form or an explicit
+Unmappable refusal (`docs/PY2MYC_MAP.md`) — Rust is the reference, not the required route.
 
 ## Gap categories (not silent failures)
 
