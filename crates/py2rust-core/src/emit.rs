@@ -4,6 +4,7 @@
 use crate::gap::{Category, GapReason};
 use crate::map::{is_any_annotation, map_type_expr, rust_ident, IdentFix};
 use rustpython_parser::ast::{self, Ranged};
+use std::collections::HashSet;
 
 /// Result of attempting to emit a construct.
 #[derive(Debug, Clone)]
@@ -50,7 +51,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         ));
     }
 
-    let mut args_out = Vec::new();
+    let mut args_out: Vec<(String, String, String)> = Vec::new();
     let mut arg_types: Vec<(String, String)> = Vec::new();
     for arg in func
         .args
@@ -106,7 +107,8 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         }
         // Keyed on the Python name, because that is what the body refers to.
         arg_types.push((aname.clone(), ty.clone()));
-        args_out.push(format!("{rs_aname}: {ty}"));
+        // Format filled in after we know which params are loop-rebound (mut).
+        args_out.push((aname, rs_aname, ty));
     }
 
     if func.args.vararg.is_some() || func.args.kwarg.is_some() {
@@ -156,6 +158,18 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         .into_iter()
         .filter(|(_, t)| is_known_type(t))
         .collect();
+    // Params rebound across loop iterations need `mut` on the signature.
+    let mut_names = names_needing_mut(&func.body, &env);
+    let args_fmt: Vec<String> = args_out
+        .into_iter()
+        .map(|(py_name, rs_aname, ty)| {
+            if mut_names.contains(&py_name) {
+                format!("mut {rs_aname}: {ty}")
+            } else {
+                format!("{rs_aname}: {ty}")
+            }
+        })
+        .collect();
     let ret_known = is_known_type(&ret_ty).then(|| ret_ty.clone());
     let body_lowered = try_lower_body(&func.body, ret_is_unit, &env, ret_known.as_deref(), None);
     let body_text = match body_lowered {
@@ -179,9 +193,9 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     };
 
     let sig = if ret_is_unit {
-        format!("fn {rs_name}({}) {{", args_out.join(", "))
+        format!("fn {rs_name}({}) {{", args_fmt.join(", "))
     } else {
-        format!("fn {rs_name}({}) -> {ret_ty} {{", args_out.join(", "))
+        format!("fn {rs_name}({}) -> {ret_ty} {{", args_fmt.join(", "))
     };
 
     let mut rust = String::new();
@@ -227,6 +241,95 @@ fn is_known_type(t: &str) -> bool {
 /// reasoning from a placeholder.
 pub type TypeEnv = std::collections::HashMap<String, String>;
 
+/// Names that must be declared `let mut` (or `mut` params) because a for/while
+/// later reassigns them. Walks in order: a name is "bound" after Assign/AnnAssign
+/// (params start bound); assign targets inside a loop that are already bound
+/// need mut so the rebind is a true assignment across iterations.
+fn names_needing_mut(body: &[ast::Stmt], env: &TypeEnv) -> HashSet<String> {
+    let mut bound: HashSet<String> = env.keys().cloned().collect();
+    let mut needs = HashSet::new();
+    scan_mut_names(body, &mut bound, &mut needs);
+    needs
+}
+
+fn scan_mut_names(body: &[ast::Stmt], bound: &mut HashSet<String>, needs: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            ast::Stmt::Assign(a) => {
+                if a.targets.len() == 1 {
+                    if let ast::Expr::Name(n) = &a.targets[0] {
+                        bound.insert(n.id.to_string());
+                    }
+                }
+            }
+            ast::Stmt::AnnAssign(a) => {
+                if let ast::Expr::Name(n) = a.target.as_ref() {
+                    bound.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::For(f) => {
+                mark_loop_rebinds(&f.body, bound, needs);
+                // Nested accumulators bound inside this loop, rebound in inner loops.
+                let mut loop_bound = bound.clone();
+                scan_mut_names(&f.body, &mut loop_bound, needs);
+            }
+            ast::Stmt::While(w) => {
+                mark_loop_rebinds(&w.body, bound, needs);
+                let mut loop_bound = bound.clone();
+                scan_mut_names(&w.body, &mut loop_bound, needs);
+            }
+            ast::Stmt::If(i) => {
+                // Function scope: both arms can bind names visible to later loops.
+                scan_mut_names(&i.body, bound, needs);
+                scan_mut_names(&i.orelse, bound, needs);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn mark_loop_rebinds(body: &[ast::Stmt], bound: &HashSet<String>, needs: &mut HashSet<String>) {
+    let mut targets = HashSet::new();
+    collect_assign_targets(body, &mut targets);
+    for t in targets {
+        if bound.contains(&t) {
+            needs.insert(t);
+        }
+    }
+}
+
+/// Assign / AnnAssign / AugAssign name targets in `body`, including nested if/for/while.
+fn collect_assign_targets(body: &[ast::Stmt], out: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            ast::Stmt::Assign(a) => {
+                if a.targets.len() == 1 {
+                    if let ast::Expr::Name(n) = &a.targets[0] {
+                        out.insert(n.id.to_string());
+                    }
+                }
+            }
+            ast::Stmt::AnnAssign(a) => {
+                if let ast::Expr::Name(n) = a.target.as_ref() {
+                    out.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::AugAssign(a) => {
+                if let ast::Expr::Name(n) = a.target.as_ref() {
+                    out.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::If(i) => {
+                collect_assign_targets(&i.body, out);
+                collect_assign_targets(&i.orelse, out);
+            }
+            ast::Stmt::For(f) => collect_assign_targets(&f.body, out),
+            ast::Stmt::While(w) => collect_assign_targets(&w.body, out),
+            _ => {}
+        }
+    }
+}
+
 /// Lower a function body. Multi-statement: assign / ann-assign / if / while /
 /// for / pass / return / break / continue. Anything else declines the whole body.
 fn try_lower_body(
@@ -235,8 +338,9 @@ fn try_lower_body(
     env: &TypeEnv,
     ret_ty: Option<&str>,
     // Names bound before entering a loop. Reassignment of these inside the
-    // loop would need `mut` (we only emit `let` shadows, which are wrong across
-    // iterations). Decline rather than emit L3-green incorrect code.
+    // loop emits a bare assignment (`x = …`) rather than a shadowing `let`,
+    // which would be wrong across iterations. The initial binding uses
+    // `let mut` when [`names_needing_mut`] marked the name.
     rebind_forbidden: Option<&TypeEnv>,
 ) -> Option<String> {
     if body.is_empty() {
@@ -256,6 +360,7 @@ fn try_lower_body(
         return Some(String::new());
     }
 
+    let mut_names = names_needing_mut(body, env);
     let mut local_env = env.clone();
     let mut lines: Vec<String> = Vec::new();
     let last = body.len() - 1;
@@ -298,18 +403,26 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
-                // Loop rebind of an outer name → would need mut; decline (honesty).
-                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
-                    return None;
-                }
                 // Prefer type forced by RHS; fall back to existing env entry.
                 let want = forced_ty(&a.value, &local_env)
                     .or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
-                // Always record the binding so loop rebind detection sees untyped
-                // literals (`total = 0`) as well as annotated names.
-                local_env.insert(name, want.unwrap_or_else(|| "_".into()));
-                lines.push(format!("    let {rs_name} = {rhs};"));
+                // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                    lines.push(format!("    {rs_name} = {rhs};"));
+                } else if mut_names.contains(&name) && !local_env.contains_key(&name) {
+                    // First outer binding of a loop accumulator.
+                    local_env.insert(name, want.unwrap_or_else(|| "_".into()));
+                    lines.push(format!("    let mut {rs_name} = {rhs};"));
+                } else if mut_names.contains(&name) && local_env.contains_key(&name) {
+                    // Further outer rebind of a mut accumulator before/between loops.
+                    lines.push(format!("    {rs_name} = {rhs};"));
+                } else {
+                    // Always record the binding so loop rebind detection sees untyped
+                    // literals (`total = 0`) as well as annotated names.
+                    local_env.insert(name, want.unwrap_or_else(|| "_".into()));
+                    lines.push(format!("    let {rs_name} = {rhs};"));
+                }
             }
             ast::Stmt::AnnAssign(a) => {
                 let name = match a.target.as_ref() {
@@ -320,16 +433,20 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
-                // Same mut-honesty gate as Assign: annotated rebind of a pre-loop
-                // name would lower to a shadowing `let` and return the wrong outer value.
-                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
-                    return None;
-                }
                 let ann_ty = map_type_expr(a.annotation.as_ref())?;
                 let value = a.value.as_deref()?;
                 let rhs = lower_simple_expr_in(value, &local_env, Some(&ann_ty))?;
-                local_env.insert(name, ann_ty);
-                lines.push(format!("    let {rs_name} = {rhs};"));
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                    lines.push(format!("    {rs_name} = {rhs};"));
+                } else if mut_names.contains(&name) && !local_env.contains_key(&name) {
+                    local_env.insert(name, ann_ty);
+                    lines.push(format!("    let mut {rs_name} = {rhs};"));
+                } else if mut_names.contains(&name) && local_env.contains_key(&name) {
+                    lines.push(format!("    {rs_name} = {rhs};"));
+                } else {
+                    local_env.insert(name, ann_ty);
+                    lines.push(format!("    let {rs_name} = {rhs};"));
+                }
             }
             ast::Stmt::AugAssign(a) => {
                 let name = match a.target.as_ref() {
@@ -340,13 +457,8 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
-                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
-                    return None;
-                }
                 let want = local_env.get(&name).cloned();
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
-                // No mut tracking yet: rewrite `x += rhs` as shadow `let x = (x + rhs)`,
-                // which is always legal Rust. Decline unsupported ops rather than invent mut.
                 let bin = match a.op {
                     ast::Operator::Add => "+",
                     ast::Operator::Sub => "-",
@@ -360,7 +472,15 @@ fn try_lower_body(
                     ast::Operator::RShift => ">>",
                     _ => return None,
                 };
-                lines.push(format!("    let {rs_name} = ({rs_name} {bin} {rhs});"));
+                // Loop rebind (or mut accumulator): real assignment. Otherwise
+                // rewrite `x += rhs` as shadow `let x = (x + rhs)` (legal sequential).
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name))
+                    || mut_names.contains(&name)
+                {
+                    lines.push(format!("    {rs_name} = ({rs_name} {bin} {rhs});"));
+                } else {
+                    lines.push(format!("    let {rs_name} = ({rs_name} {bin} {rhs});"));
+                }
             }
             ast::Stmt::If(i) => {
                 let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
@@ -448,8 +568,7 @@ fn lower_while(
         return None;
     }
     let test = lower_simple_expr_in(&w.test, env, Some("bool"))?;
-    // Forbid rebinding anything visible at loop entry (outer_rebind ∪ env).
-    // `env` alone is enough: it already contains outer names.
+    // Env at loop entry is rebind_forbidden: reassignment emits bare assignment.
     let _ = outer_rebind; // retained for call-site symmetry / future union
     let body = try_lower_body(&w.body, true, env, ret_ty, Some(env))?;
     let body_inner = indent_block(&body);
@@ -462,7 +581,7 @@ fn lower_while(
 /// - bare name / simple expr that already lowers → `for x in <expr>`
 ///
 /// for/else declined (Python-only). Unpacking targets declined.
-/// Rebinding names bound before the loop is declined (needs `mut`).
+/// Rebinding names bound before the loop uses `let mut` + assignment (not shadow `let`).
 fn lower_for(
     f: &ast::StmtFor,
     env: &TypeEnv,
@@ -482,7 +601,7 @@ fn lower_for(
     }
     let iter = lower_for_iter(f.iter.as_ref(), env)?;
     let _ = outer_rebind;
-    // Env at loop entry: reassignment of these names needs mut — decline.
+    // Env at loop entry: reassignment of these names is bare assignment (mut on outer).
     let body = try_lower_body(&f.body, true, env, ret_ty, Some(env))?;
     let body_inner = indent_block(&body);
     Some(format!(
