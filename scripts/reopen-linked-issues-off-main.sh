@@ -148,13 +148,13 @@ self_test() {
     [[ "$got" == "missing" ]] || { printf 'SELF-TEST FAIL classify missing: %q\n' "$got" >&2; fail=1; }
 
     # --- 3) gh auth + repo visibility ---
-    if ! gh api user --jq .login >/dev/null; then
-        printf 'SELF-TEST FAIL: gh api user (token dead or missing scopes)\n' >&2
-        fail=1
-    fi
+    # Do NOT call `gh api user` here. Actions GITHUB_TOKEN is an installation
+    # token: `GET /user` returns HTTP 403 "Resource not accessible by
+    # integration" even when issues:write works. Probe the resources this
+    # workflow actually needs (repo meta + issue read/write path).
     repo="${GITHUB_REPOSITORY:-tzervas/py2rust}"
     if ! gh api "repos/${repo}" --jq .full_name >/dev/null; then
-        printf 'SELF-TEST FAIL: cannot read target repo via gh api\n' >&2
+        printf 'SELF-TEST FAIL: cannot read target repo via gh api (token dead or missing scopes)\n' >&2
         fail=1
     fi
 
@@ -166,6 +166,15 @@ self_test() {
         fail=1
     else
         printf 'self-test issue-read probe: #13 state=%s\n' "$probe_state"
+    fi
+
+    # --- 5) outside Actions only: also verify a user-scoped token works ---
+    # Personal/local runs should still catch a dead user token early.
+    if [[ -z "${GITHUB_ACTIONS:-}" ]]; then
+        if ! gh api user --jq .login >/dev/null; then
+            printf 'SELF-TEST FAIL: gh api user (local token dead or missing scopes)\n' >&2
+            fail=1
+        fi
     fi
 
     if (( fail != 0 )); then
