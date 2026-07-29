@@ -830,6 +830,43 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             }
             Some(format!("vec![{}]", parts.join(", ")))
         }
+        // Simple attribute access: `name.attr` / nested attrs already lowerable.
+        // No method-map invention — rustc is the type check. Renamed idents decline.
+        ast::Expr::Attribute(a) => {
+            let base = lower_simple_expr_in(a.value.as_ref(), env, None)?;
+            let (rs_attr, fix) = rust_ident(a.attr.as_str());
+            if matches!(fix, IdentFix::Renamed) {
+                return None;
+            }
+            Some(format!("{base}.{rs_attr}"))
+        }
+        // Simple calls: `name(args…)` or `recv.attr(args…)`, positional only.
+        // kwargs / *args / **kwargs decline (honest). range() stays a for-iter special
+        // case and is not rewritten here into a free function call.
+        ast::Expr::Call(c) => {
+            if !c.keywords.is_empty() {
+                return None;
+            }
+            for arg in &c.args {
+                if matches!(arg, ast::Expr::Starred(_)) {
+                    return None;
+                }
+            }
+            // Do not lower bare `range(...)` as a free call — that is not valid Rust
+            // and the for-loop path already special-cases it. Elsewhere (e.g. `x = range(n)`)
+            // declining is more honest than emitting `range(n)`.
+            if let ast::Expr::Name(n) = c.func.as_ref() {
+                if n.id.as_str() == "range" {
+                    return None;
+                }
+            }
+            let func = lower_simple_expr_in(c.func.as_ref(), env, None)?;
+            let mut args = Vec::with_capacity(c.args.len());
+            for arg in &c.args {
+                args.push(lower_simple_expr_in(arg, env, None)?);
+            }
+            Some(format!("{func}({})", args.join(", ")))
+        }
         _ => None,
     }
 }

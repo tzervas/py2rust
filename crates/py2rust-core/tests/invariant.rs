@@ -562,6 +562,62 @@ x_dyn = unknown()
             .any(|g| g.category == Category::DynamicTyping
                 && g.item_name.as_deref() == Some("x_dyn")),
         "non-literal must DynamicTyping-gap: {:?}",
+
+#[test]
+fn simple_call_and_attr_lower() {
+    // Use mapped types only — DynamicTyping is out of scope for #50.
+    let src = r#"
+def get_x(p: list[int]) -> int:
+    return p.x
+
+def call_f(x: int) -> int:
+    return f(x)
+
+def method_call(p: list[int], n: int) -> int:
+    return p.get(n)
+"#;
+    let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "simple call/attr must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    for name in ["get_x", "call_f", "method_call"] {
+        assert!(
+            report.emitted_items.iter().any(|n| n == name),
+            "expected {name}: {:?}",
+            report.emitted_items
+        );
+    }
+    assert!(rust.contains("p.x"), "attr: {rust}");
+    assert!(rust.contains("f(x)"), "call: {rust}");
+    assert!(rust.contains("p.get(n)"), "method: {rust}");
+}
+
+#[test]
+fn call_with_kwargs_declines() {
+    let src = r#"
+def g(x: int) -> int:
+    return f(x, y=1)
+"#;
+    let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "kwargs call must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn starargs_call_declines() {
+    let src = r#"
+def g(xs: list[int]) -> int:
+    return f(*xs)
+"#;
+    let (report, _) = transpile_source(src, "star.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "starargs must FunctionBody-gap: {:?}",
         report.gaps
     );
 }
