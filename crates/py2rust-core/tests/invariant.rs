@@ -562,6 +562,9 @@ x_dyn = unknown()
             .any(|g| g.category == Category::DynamicTyping
                 && g.item_name.as_deref() == Some("x_dyn")),
         "non-literal must DynamicTyping-gap: {:?}",
+        report.gaps
+    );
+}
 
 #[test]
 fn simple_call_and_attr_lower() {
@@ -621,3 +624,23 @@ def g(xs: list[int]) -> int:
         report.gaps
     );
 }
+
+#[test]
+fn free_range_call_declines() {
+    let src = r#"
+def g(n: int) -> int:
+    return range(n)
+"#;
+    let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "free range must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    // Body should be todo, not a free `range(` call claiming validity.
+    assert!(
+        rust.contains("todo!"),
+        "expected FunctionBody stub, got:\n{rust}"
+    );
+}
+
