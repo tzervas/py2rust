@@ -10,6 +10,7 @@ use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_impor
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
+use std::collections::HashSet;
 use thiserror::Error;
 
 const SNIPPET_MAX: usize = 200;
@@ -80,6 +81,10 @@ pub fn transpile_source(
             .unwrap_or("module")
     });
 
+    // Names that appear exactly once as a simple Name binding and are never
+    // AugAssign/Delete targets are eligible for `const` emission.
+    let const_eligible = module_const_eligible_names(&module.body);
+
     for stmt in &module.body {
         let (line, col) = line_col(source, stmt.range().start().to_u32());
         let snip = snippet(
@@ -89,7 +94,7 @@ pub fn transpile_source(
             SNIPPET_MAX,
         );
 
-        match dispatch_stmt(stmt, source) {
+        match dispatch_stmt(stmt, source, &const_eligible) {
             Outcome::Emitted(em) => {
                 if !em.rust.is_empty() {
                     chunks.push(em.rust);
@@ -164,7 +169,7 @@ pub fn transpile_file(
 }
 
 /// Exhaustive-style dispatch: every `Stmt` arm records emit and/or gap.
-pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
+pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<String>) -> Outcome {
     match stmt {
         ast::Stmt::FunctionDef(f) => dispatch_function(f, source),
         ast::Stmt::AsyncFunctionDef(f) => Outcome::Gapped {
@@ -300,7 +305,7 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
                         .into(),
                     item_name: assign_target_name(&a.targets),
                 }
-            } else if let Some(em) = try_emit_module_literal_assign(a) {
+            } else if let Some(em) = try_emit_module_literal_assign(a, const_eligible) {
                 // Module-level `x = 1` / `s = "hi"` / … with a known literal → const item.
                 Outcome::Emitted(em)
             } else {
@@ -315,7 +320,7 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
         }
         ast::Stmt::AnnAssign(a) => {
             // Annotated module assign with a known literal RHS → const with mapped type.
-            if let Some(em) = try_emit_module_ann_assign(a) {
+            if let Some(em) = try_emit_module_ann_assign(a, const_eligible) {
                 Outcome::Emitted(em)
             } else {
                 Outcome::Gapped {
@@ -510,11 +515,61 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
 /// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
 /// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
 /// const-legal at L3 (`String` is not a const type).
-fn try_emit_module_literal_assign(a: &ast::StmtAssign) -> Option<Emitted> {
+
+/// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
+/// to a single `Name` target, and never an AugAssign or Delete target.
+fn module_const_eligible_names(body: &[ast::Stmt]) -> HashSet<String> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut mutated: HashSet<String> = HashSet::new();
+
+    for stmt in body {
+        match stmt {
+            ast::Stmt::Assign(a) if a.targets.len() == 1 => {
+                if let Some(n) = expr_name(&a.targets[0]) {
+                    *counts.entry(n).or_insert(0) += 1;
+                }
+            }
+            ast::Stmt::AnnAssign(a) => {
+                if let Some(n) = expr_name(&a.target) {
+                    *counts.entry(n).or_insert(0) += 1;
+                }
+            }
+            ast::Stmt::AugAssign(a) => {
+                if let Some(n) = expr_name(&a.target) {
+                    mutated.insert(n);
+                }
+            }
+            ast::Stmt::Delete(d) => {
+                for t in &d.targets {
+                    if let Some(n) = expr_name(t) {
+                        mutated.insert(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter(|(n, c)| *c == 1 && !mutated.contains(n))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant
+/// and the name is const-eligible (single bind, never mutated).
+fn try_emit_module_literal_assign(
+    a: &ast::StmtAssign,
+    const_eligible: &HashSet<String>,
+) -> Option<Emitted> {
     if a.targets.len() != 1 {
         return None;
     }
     let py_name = expr_name(&a.targets[0])?;
+    if !const_eligible.contains(&py_name) {
+        return None;
+    }
     let ast::Expr::Constant(c) = a.value.as_ref() else {
         return None;
     };
@@ -522,10 +577,16 @@ fn try_emit_module_literal_assign(a: &ast::StmtAssign) -> Option<Emitted> {
     Some(emit_module_const(&py_name, &ty, &lit))
 }
 
-/// Module-level `NAME: T = <literal>` → `const` when both annotation and literal are known
-/// and const-compatible.
-fn try_emit_module_ann_assign(a: &ast::StmtAnnAssign) -> Option<Emitted> {
+/// Module-level `NAME: T = <literal>` → `const` when annotation + literal are known,
+/// const-compatible, and the name is const-eligible.
+fn try_emit_module_ann_assign(
+    a: &ast::StmtAnnAssign,
+    const_eligible: &HashSet<String>,
+) -> Option<Emitted> {
     let py_name = expr_name(&a.target)?;
+    if !const_eligible.contains(&py_name) {
+        return None;
+    }
     let value = a.value.as_ref()?;
     let ast::Expr::Constant(c) = value.as_ref() else {
         return None;
@@ -547,7 +608,6 @@ fn emit_module_const(py_name: &str, ty: &str, lit: &str) -> Emitted {
             ),
         ));
     }
-    // Module items mirror function emission (no `pub`); L3 only needs a compiling item.
     let rust = format!("const {rs_name}: {ty} = {lit};\n");
     Emitted {
         name: py_name.to_string(),
@@ -559,34 +619,37 @@ fn emit_module_const(py_name: &str, ty: &str, lit: &str) -> Emitted {
 /// Infer Rust type + literal text for a bare module-level constant RHS.
 fn constant_literal_ty_and_val(c: &ast::Constant) -> Option<(String, String)> {
     match c {
-        ast::Constant::Int(i) => Some(("i64".into(), i.to_string())),
-        // `{:?}` keeps a decimal point on whole floats (`1.0` not `1`).
+        // Only ints that fit i64 — unbounded Python ints must not claim i64.
+        ast::Constant::Int(i) => {
+            let v: i64 = i.try_into().ok()?;
+            Some(("i64".into(), v.to_string()))
+        }
         ast::Constant::Float(f) => Some(("f64".into(), format!("{f:?}"))),
         ast::Constant::Bool(b) => Some(("bool".into(), b.to_string())),
-        // `&str` is const-legal; Python `str` maps to `String` elsewhere, but
-        // `const X: String = …` is not valid Rust.
         ast::Constant::Str(s) => Some(("&str".into(), format!("{:?}", s.as_str()))),
         ast::Constant::None => Some(("()".into(), "()".into())),
         _ => None,
     }
 }
 
-/// Map a known annotation type to a const-legal Rust type (or decline).
 fn const_compatible_type(mapped: &str) -> Option<&str> {
     match mapped {
         "i64" | "f64" | "bool" | "()" => Some(mapped),
-        // Python `str` → `String` in function signatures; module const uses `&str`.
         "String" => Some("&str"),
         _ => None,
     }
 }
 
-/// Render a constant under an expected const type; decline on mismatch.
 fn constant_to_rust_for_type(c: &ast::Constant, expected: &str) -> Option<String> {
     match (c, expected) {
-        (ast::Constant::Int(i), "i64") => Some(i.to_string()),
-        // Python accepts int where float is annotated; Rust needs an `f64` literal.
-        (ast::Constant::Int(i), "f64") => Some(format!("{i}.0")),
+        (ast::Constant::Int(i), "i64") => {
+            let v: i64 = i.try_into().ok()?;
+            Some(v.to_string())
+        }
+        (ast::Constant::Int(i), "f64") => {
+            let v: i64 = i.try_into().ok()?;
+            Some(format!("{v}.0"))
+        }
         (ast::Constant::Float(f), "f64") => Some(format!("{f:?}")),
         (ast::Constant::Bool(b), "bool") => Some(b.to_string()),
         (ast::Constant::Str(s), "&str") => Some(format!("{:?}", s.as_str())),
@@ -869,4 +932,54 @@ RATE: float = 2
         );
         assert!(r.emitted_items.is_empty());
     }
+    #[test]
+    fn rebind_module_name_not_const() {
+        let (r, rust) = transpile_source("x = 1
+x = 2
+", "rebind.py", None).unwrap();
+        assert!(
+            !rust.contains("const x"),
+            "rebound name must not emit const:
+{rust}"
+        );
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "rebind should DynamicTyping-gap: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn oversized_int_not_i64_const() {
+        let (r, rust) = transpile_source(
+            "x = 99999999999999999999999999999
+",
+            "big.py",
+            None,
+        )
+        .unwrap();
+        assert!(
+            !rust.contains("const x"),
+            "out-of-range int must not claim i64 const:
+{rust}"
+        );
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "oversized int should gap: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn augassign_blocks_const() {
+        let (r, rust) = transpile_source("x = 1
+x += 1
+", "aug.py", None).unwrap();
+        assert!(
+            !rust.contains("const x"),
+            "AugAssign must block const:
+{rust}"
+        );
+    }
+
 }
