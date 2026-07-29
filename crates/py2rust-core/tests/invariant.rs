@@ -243,7 +243,15 @@ fn mixed_covers_readme_categories() {
         cats.contains_key("Metaprogramming"),
         "Metaprogramming: {cats:?}"
     );
-    assert!(cats.contains_key("Import"), "Import: {cats:?}");
+    assert!(
+        cats.contains_key("Import")
+            || report
+                .emitted_items
+                .iter()
+                .any(|n| n.starts_with("#import:")),
+        "Import gap or stdlib import-map emit required: cats={cats:?} emitted={:?}",
+        report.emitted_items
+    );
     assert!(cats.contains_key("Lambda"), "Lambda: {cats:?}");
     // Typed function still emitted
     assert!(report.emitted_items.iter().any(|n| n == "typed_add"));

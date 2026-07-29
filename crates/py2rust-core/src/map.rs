@@ -280,7 +280,8 @@ pub fn map_or_default(expr: Option<&ast::Expr>, default: &str) -> Result<String,
 /// as Import gaps inflated DynamicTyping-adjacent noise on every annotated file.
 pub fn is_erasable_import_module(module: &str) -> bool {
     // Type-only / annotation-surface modules: leave no Rust residue once types map.
-    // Runtime-using imports (json, sys, re, …) stay gapped until a real use-map lands.
+    // Runtime stdlib with an honest `use` map goes through [`is_mappable_import`].
+    // Modules needing external crates (json, re) stay Import-gapped with crate hints.
     matches!(
         module,
         "__future__"
@@ -289,6 +290,65 @@ pub fn is_erasable_import_module(module: &str) -> bool {
             | "collections.abc"
             | "pathlib" // Path maps as PathBuf by bare name; runtime pathlib APIs still gap at call
     )
+}
+
+/// Map a high-frequency Python stdlib import to Rust `use` lines when honest.
+///
+/// Only emits `use` for `std` paths that compile in isolation (no new crate deps).
+/// Returns `None` for unmapped modules and for modules that need external crates
+/// (`json` → serde_json, `re` → regex) — those stay Import gaps via
+/// [`import_gap_reason`].
+///
+/// Does **not** erase runtime modules: emission is advisory `use` scaffolding, not
+/// a claim that Python APIs were fully lowered.
+pub fn is_mappable_import(module: &str) -> Option<String> {
+    match module {
+        "sys" => Some(
+            "// py2rust: import sys → std::env / process (partial)\nuse std::env;".into(),
+        ),
+        "os" => Some(
+            "// py2rust: import os → std::fs / std::path (partial)\nuse std::fs;\nuse std::path::{Path, PathBuf};".into(),
+        ),
+        "time" => Some(
+            "// py2rust: import time → std::time (partial)\nuse std::time;".into(),
+        ),
+        "subprocess" => Some(
+            "// py2rust: import subprocess → std::process (partial)\nuse std::process;".into(),
+        ),
+        "io" => Some("// py2rust: import io → std::io (partial)\nuse std::io;".into()),
+        _ => None,
+    }
+}
+
+/// Honesty-preserving Import gap reason for an unmapped module name.
+///
+/// External-crate modules get an explicit crate pointer; everything else keeps
+/// the generic unresolved/unmapped message.
+pub fn import_gap_reason(module: &str) -> String {
+    match module {
+        "json" => {
+            "import json not lowered — needs serde_json crate (not in generated crate deps; flag not guess)"
+                .into()
+        }
+        "re" => {
+            "import re not lowered — needs regex crate (not in generated crate deps; flag not guess)"
+                .into()
+        }
+        "tempfile" => {
+            "import tempfile not lowered — needs tempfile crate (not in generated crate deps; flag not guess)"
+                .into()
+        }
+        "argparse" => {
+            "import argparse not lowered — map to clap at app boundary (flag not guess)".into()
+        }
+        "logging" => {
+            "import logging not lowered — needs log/tracing crate (not in generated crate deps; flag not guess)"
+                .into()
+        }
+        other => format!(
+            "import {other} not lowered — unresolved / unmapped import (flag not guess)"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -395,5 +455,42 @@ mod ident_tests {
                 IdentFix::Verbatim => panic!("`{kw}` is a keyword and must not be emitted bare"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod import_map_tests {
+    use super::*;
+
+    #[test]
+    fn mappable_stdlib_emits_use_lines() {
+        let sys = is_mappable_import("sys").expect("sys");
+        assert!(sys.contains("use std::env;"));
+        assert!(sys.contains("partial"));
+
+        let os = is_mappable_import("os").expect("os");
+        assert!(os.contains("use std::fs;"));
+        assert!(os.contains("use std::path::{Path, PathBuf};"));
+
+        let time = is_mappable_import("time").expect("time");
+        assert!(time.contains("use std::time;"));
+
+        let sub = is_mappable_import("subprocess").expect("subprocess");
+        assert!(sub.contains("use std::process;"));
+    }
+
+    #[test]
+    fn crate_backed_and_unknown_are_not_mappable() {
+        assert_eq!(is_mappable_import("json"), None);
+        assert_eq!(is_mappable_import("re"), None);
+        assert_eq!(is_mappable_import("totally_unknown_mod"), None);
+        assert_eq!(is_mappable_import("typing"), None); // erasable, not use-mapped
+    }
+
+    #[test]
+    fn import_gap_reason_points_at_crates() {
+        assert!(import_gap_reason("json").contains("serde_json"));
+        assert!(import_gap_reason("re").contains("regex"));
+        assert!(import_gap_reason("foo").contains("unmapped"));
     }
 }
