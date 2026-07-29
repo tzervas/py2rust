@@ -1,5 +1,5 @@
 {
-  "generated": "Empirical/Declared — lite heading/line heuristic over markdown in py2rust via tero-mcp/scripts/generate_lite_index.py; source files are ground truth. Generated 2026-07-09.",
+  "generated": "Empirical/Declared — lite heading/line heuristic over markdown in py2rust via tero-mcp/scripts/generate_lite_index.py; source files are ground truth. Generated 2026-07-29.",
   "item_tag": "Empirical/Declared",
   "siblings": [],
   "items": [
@@ -51,7 +51,7 @@
       "file": "AGENTS.md",
       "line": 36,
       "tag": "Empirical/Declared",
-      "summary": "Look for:"
+      "summary": "Prefer the Rust product path:"
     },
     {
       "anchor": "agents--further-reading",
@@ -59,7 +59,7 @@
       "kind": "section",
       "title": "Further reading",
       "file": "AGENTS.md",
-      "line": 44,
+      "line": 53,
       "tag": "Empirical/Declared",
       "summary": "- README.md"
     },
@@ -69,9 +69,118 @@
       "kind": "section",
       "title": "Hygiene + Tero landing (chore/tero-index-cabal-ready, 2026-07-09 appended)",
       "file": "AGENTS.md",
-      "line": 54,
+      "line": 63,
       "tag": "Empirical/Declared",
       "summary": "Tero-first (via /root/git/scripts/tero.sh identify + textsearch \"chore tero hygiene check ROADMAP scaffolding\" + cites to AGENTS local-checks, tero-index)."
+    },
+    {
+      "anchor": "claude",
+      "family": "doc",
+      "kind": "section",
+      "title": "CLAUDE.md — py2rust",
+      "file": "CLAUDE.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "summary": "Short notes for Claude / coding agents working in this repo."
+    },
+    {
+      "anchor": "claude--product",
+      "family": "doc",
+      "kind": "section",
+      "title": "Product",
+      "file": "CLAUDE.md",
+      "line": 5,
+      "tag": "Empirical/Declared",
+      "summary": "Rust-first Python → Rust transpiler with honest gap reporting (never silent success). Unlowered constructs become structured .gap.json categories."
+    },
+    {
+      "anchor": "claude--5-minute-cli",
+      "family": "doc",
+      "kind": "section",
+      "title": "5-minute CLI",
+      "file": "CLAUDE.md",
+      "line": 11,
+      "tag": "Empirical/Declared",
+      "summary": "cargo build -p py2rust"
+    },
+    {
+      "anchor": "claude--from-repo-root",
+      "family": "doc",
+      "kind": "other",
+      "title": "From repo root",
+      "file": "CLAUDE.md",
+      "line": 14,
+      "tag": "Empirical/Declared",
+      "summary": "cargo build -p py2rust"
+    },
+    {
+      "anchor": "claude--py2rust-0.2.0",
+      "family": "doc",
+      "kind": "other",
+      "title": "→ py2rust 0.2.0",
+      "file": "CLAUDE.md",
+      "line": 19,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simplefn.py"
+    },
+    {
+      "anchor": "claude--analyze-issues-stem.gap.json",
+      "family": "doc",
+      "kind": "other",
+      "title": "Analyze: issues + <stem>.gap.json",
+      "file": "CLAUDE.md",
+      "line": 21,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simplefn.py"
+    },
+    {
+      "anchor": "claude--transpile-write-.rs-.gap.json",
+      "family": "doc",
+      "kind": "other",
+      "title": "Transpile: write .rs + .gap.json",
+      "file": "CLAUDE.md",
+      "line": 24,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- transpile crates/py2rust-core/fixtures/simplefn.py -o /tmp/simplefn.rs"
+    },
+    {
+      "anchor": "claude--mixed-fixture-gaps-expected",
+      "family": "doc",
+      "kind": "other",
+      "title": "Mixed fixture (gaps expected)",
+      "file": "CLAUDE.md",
+      "line": 27,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/mixed.py --json"
+    },
+    {
+      "anchor": "claude--layout",
+      "family": "doc",
+      "kind": "section",
+      "title": "Layout",
+      "file": "CLAUDE.md",
+      "line": 39,
+      "tag": "Empirical/Declared"
+    },
+    {
+      "anchor": "claude--checks",
+      "family": "doc",
+      "kind": "section",
+      "title": "Checks",
+      "file": "CLAUDE.md",
+      "line": 49,
+      "tag": "Empirical/Declared",
+      "summary": "cargo test --workspace"
+    },
+    {
+      "anchor": "claude--rules",
+      "family": "doc",
+      "kind": "section",
+      "title": "Rules",
+      "file": "CLAUDE.md",
+      "line": 57,
+      "tag": "Empirical/Declared",
+      "summary": "1. Prefer Rust CLI (cargo run -p py2rust -- …) over the deprecated Python package."
     },
     {
       "anchor": "readme",
@@ -81,47 +190,146 @@
       "file": "README.md",
       "line": 1,
       "tag": "Empirical/Declared",
-      "summary": "Python to Rust transpiler and code conversion assistant."
+      "summary": "<!-- FLEET-BADGES:BEGIN -->"
     },
     {
-      "anchor": "readme--installation",
+      "anchor": "readme--status",
       "family": "doc",
       "kind": "section",
-      "title": "Installation",
+      "title": "Status",
       "file": "README.md",
-      "line": 5,
+      "line": 14,
       "tag": "Empirical/Declared",
-      "summary": "pip install py2rust"
+      "summary": "Requirements: Rust 1.85+ (see rust-toolchain.toml)."
     },
     {
-      "anchor": "readme--usage",
+      "anchor": "readme--5-minute-path",
       "family": "doc",
       "kind": "section",
-      "title": "Usage",
+      "title": "5-minute path",
       "file": "README.md",
-      "line": 11,
+      "line": 24,
       "tag": "Empirical/Declared",
-      "summary": "Transpile Python code to Rust:"
+      "summary": "Requirements: Rust 1.85+ (see rust-toolchain.toml)."
     },
     {
-      "anchor": "readme--features",
+      "anchor": "readme--py2rust-0.2.0",
       "family": "doc",
-      "kind": "section",
-      "title": "Features",
+      "kind": "other",
+      "title": "→ py2rust 0.2.0",
       "file": "README.md",
-      "line": 25,
+      "line": 36,
       "tag": "Empirical/Declared",
-      "summary": "- AST-based Transpilation: Convert Python syntax to equivalent Rust constructs"
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simplefn.py"
     },
     {
-      "anchor": "readme--current-limitations",
+      "anchor": "readme--analyze-fixture-writes-.gap.json-beside-source",
+      "family": "doc",
+      "kind": "other",
+      "title": "Analyze fixture (writes .gap.json beside source)",
+      "file": "README.md",
+      "line": 38,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- analyze crates/py2rust-core/fixtures/simplefn.py"
+    },
+    {
+      "anchor": "readme--transpile-to-a-temp-path",
+      "family": "doc",
+      "kind": "other",
+      "title": "Transpile to a temp path",
+      "file": "README.md",
+      "line": 41,
+      "tag": "Empirical/Declared",
+      "summary": "cargo run -p py2rust -- transpile crates/py2rust-core/fixtures/simplefn.py -o /tmp/simplefn.rs"
+    },
+    {
+      "anchor": "readme--tmp-simplefn.rs-tmp-simplefn.gap.json",
+      "family": "doc",
+      "kind": "other",
+      "title": "→ /tmp/simple_fn.rs + /tmp/simple_fn.gap.json",
+      "file": "README.md",
+      "line": 43,
+      "tag": "Empirical/Declared",
+      "summary": "Install the CLI onto your PATH:"
+    },
+    {
+      "anchor": "readme--example",
       "family": "doc",
       "kind": "section",
-      "title": "Current Limitations",
+      "title": "Example",
       "file": "README.md",
-      "line": 32,
+      "line": 54,
       "tag": "Empirical/Declared",
-      "summary": "This is an early-stage transpiler that handles basic function conversion. Complex Python features like:"
+      "summary": "def add(x: int, y: int) -> int:"
+    },
+    {
+      "anchor": "readme--demo.py",
+      "family": "doc",
+      "kind": "other",
+      "title": "demo.py",
+      "file": "README.md",
+      "line": 57,
+      "tag": "Empirical/Declared",
+      "summary": "def add(x: int, y: int) -> int:"
+    },
+    {
+      "anchor": "readme--demo.rs-emits-add",
+      "family": "doc",
+      "kind": "other",
+      "title": "→ demo.rs  (emits add)",
+      "file": "README.md",
+      "line": 67,
+      "tag": "Empirical/Declared",
+      "summary": "crates/"
+    },
+    {
+      "anchor": "readme--demo.gap.json-class-gap-for-foo",
+      "family": "doc",
+      "kind": "other",
+      "title": "→ demo.gap.json  (Class gap for Foo)",
+      "file": "README.md",
+      "line": 68,
+      "tag": "Empirical/Declared",
+      "summary": "crates/"
+    },
+    {
+      "anchor": "readme--architecture",
+      "family": "doc",
+      "kind": "section",
+      "title": "Architecture",
+      "file": "README.md",
+      "line": 71,
+      "tag": "Empirical/Declared",
+      "summary": "crates/"
+    },
+    {
+      "anchor": "readme--gap-categories-not-silent-failures",
+      "family": "doc",
+      "kind": "section",
+      "title": "Gap categories (not silent failures)",
+      "file": "README.md",
+      "line": 92,
+      "tag": "Empirical/Declared"
+    },
+    {
+      "anchor": "readme--what-works-today-mvp",
+      "family": "doc",
+      "kind": "section",
+      "title": "What works today (MVP)",
+      "file": "README.md",
+      "line": 110,
+      "tag": "Empirical/Declared",
+      "summary": "- Top-level def foo(x: int) -> int with a simple body (return constant, name, or binary op)"
+    },
+    {
+      "anchor": "readme--what-does-not-work-by-design-later-packages",
+      "family": "doc",
+      "kind": "section",
+      "title": "What does **not** work (by design / later packages)",
+      "file": "README.md",
+      "line": 117,
+      "tag": "Empirical/Declared",
+      "summary": "- Full semantic equivalence Python ↔ Rust"
     },
     {
       "anchor": "readme--development",
@@ -129,39 +337,19 @@
       "kind": "section",
       "title": "Development",
       "file": "README.md",
-      "line": 43,
+      "line": 124,
       "tag": "Empirical/Declared",
-      "summary": "This project uses [uv](https://github.com/astral-sh/uv) for dependency management."
+      "summary": "cargo test --workspace"
     },
     {
-      "anchor": "readme--install-dependencies",
+      "anchor": "readme--python-scaffold-deprecated",
       "family": "doc",
-      "kind": "other",
-      "title": "Install dependencies",
+      "kind": "section",
+      "title": "Python scaffold (deprecated)",
       "file": "README.md",
-      "line": 48,
+      "line": 132,
       "tag": "Empirical/Declared",
-      "summary": "uv sync"
-    },
-    {
-      "anchor": "readme--run-tests",
-      "family": "doc",
-      "kind": "other",
-      "title": "Run tests",
-      "file": "README.md",
-      "line": 51,
-      "tag": "Empirical/Declared",
-      "summary": "uv run pytest"
-    },
-    {
-      "anchor": "readme--format-code",
-      "family": "doc",
-      "kind": "other",
-      "title": "Format code",
-      "file": "README.md",
-      "line": 54,
-      "tag": "Empirical/Declared",
-      "summary": "uv run black src/"
+      "summary": "src/py2rust/ remains as a legacy thin CLI. Prefer the Rust binary:"
     },
     {
       "anchor": "readme--license",
@@ -169,9 +357,239 @@
       "kind": "section",
       "title": "License",
       "file": "README.md",
-      "line": 59,
+      "line": 142,
       "tag": "Empirical/Declared",
-      "summary": "MIT License - see [LICENSE](LICENSE) for details."
+      "summary": "MIT — see [LICENSE](LICENSE)."
+    },
+    {
+      "anchor": "reuse-debt",
+      "family": "doc",
+      "kind": "section",
+      "title": "REUSE debt — py2rust (P24f bootstrap)",
+      "file": "REUSE-DEBT.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "summary": "Generated by P24f REUSE bootstrap. Full REUSE compliance is deferred;"
+    },
+    {
+      "anchor": "reuse-debt--missing-copyright-and-licensing-information",
+      "family": "doc",
+      "kind": "other",
+      "title": "MISSING COPYRIGHT AND LICENSING INFORMATION",
+      "file": "REUSE-DEBT.md",
+      "line": 9,
+      "tag": "Empirical/Declared",
+      "summary": "The following files have no copyright and licensing information:"
+    },
+    {
+      "anchor": "reuse-debt--summary",
+      "family": "doc",
+      "kind": "other",
+      "title": "SUMMARY",
+      "file": "REUSE-DEBT.md",
+      "line": 20,
+      "tag": "Empirical/Declared",
+      "summary": " Bad licenses: 0"
+    },
+    {
+      "anchor": "reuse-debt--recommendations",
+      "family": "doc",
+      "kind": "other",
+      "title": "RECOMMENDATIONS",
+      "file": "REUSE-DEBT.md",
+      "line": 36,
+      "tag": "Empirical/Declared",
+      "summary": " Fix missing copyright/licensing information: For one or more files, the tool"
+    },
+    {
+      "anchor": "fleetstandards",
+      "family": "doc",
+      "kind": "section",
+      "title": "Fleet standards (tzervas)",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "summary": "Applied from the workstation pack under plans/fleet-standards/pack/."
+    },
+    {
+      "anchor": "fleetstandards--workflows",
+      "family": "doc",
+      "kind": "section",
+      "title": "Workflows",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 5,
+      "tag": "Empirical/Declared",
+      "summary": "- dev / feature merges: Refs #n only — issues stay open"
+    },
+    {
+      "anchor": "fleetstandards--issue-close-policy",
+      "family": "doc",
+      "kind": "section",
+      "title": "Issue close policy",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 14,
+      "tag": "Empirical/Declared",
+      "summary": "- dev / feature merges: Refs #n only — issues stay open"
+    },
+    {
+      "anchor": "fleetstandards--badges",
+      "family": "doc",
+      "kind": "section",
+      "title": "Badges",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 20,
+      "tag": "Empirical/Declared",
+      "summary": "README badges use GitHub Actions SVG for trunk branch — live status, not static green."
+    },
+    {
+      "anchor": "fleetstandards--copilot",
+      "family": "doc",
+      "kind": "section",
+      "title": "Copilot",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 24,
+      "tag": "Empirical/Declared",
+      "summary": "Automatic Copilot code reviews are disabled for fleet-managed repos. Do not request Copilot on PRs."
+    },
+    {
+      "anchor": "fleetstandards--permissions",
+      "family": "doc",
+      "kind": "section",
+      "title": "Permissions",
+      "file": "docs/FLEET_STANDARDS.md",
+      "line": 28,
+      "tag": "Empirical/Declared",
+      "summary": "Workflows use minimum permissions: blocks (contents read; issues write only for close/reopen jobs)."
+    },
+    {
+      "anchor": "portfrommycelium",
+      "family": "doc",
+      "kind": "section",
+      "title": "Port from mycelium-transpile (research snapshot)",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "summary": "Source: [research/mycelium-transpile-snapshot/](../research/mycelium-transpile-snapshot/)"
+    },
+    {
+      "anchor": "portfrommycelium--what-we-reuse",
+      "family": "doc",
+      "kind": "section",
+      "title": "What we reuse",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 7,
+      "tag": "Empirical/Declared"
+    },
+    {
+      "anchor": "portfrommycelium--what-we-deliberately-do-not-copy",
+      "family": "doc",
+      "kind": "section",
+      "title": "What we deliberately do **not** copy",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 19,
+      "tag": "Empirical/Declared",
+      "summary": "- Nodule layout, .myc emission, myc check oracle"
+    },
+    {
+      "anchor": "portfrommycelium--honesty-rules-adopted-g2-vr-5-spirit",
+      "family": "doc",
+      "kind": "section",
+      "title": "Honesty rules adopted (G2 / VR-5 spirit)",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 25,
+      "tag": "Empirical/Declared",
+      "summary": "1. Never-silent at module top-level: covered by dispatch + unit tests."
+    },
+    {
+      "anchor": "portfrommycelium--python-mycelium-native-map-this-tree",
+      "family": "doc",
+      "kind": "section",
+      "title": "Python → Mycelium-native map (this tree)",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 33,
+      "tag": "Empirical/Declared",
+      "summary": "Beyond the Rust emission path, interface + mycmap record the correct"
+    },
+    {
+      "anchor": "portfrommycelium--provenance",
+      "family": "doc",
+      "kind": "section",
+      "title": "Provenance",
+      "file": "docs/PORT_FROM_MYCELIUM.md",
+      "line": 46,
+      "tag": "Empirical/Declared",
+      "summary": "See [research/mycelium-transpile-snapshot/PROVENANCE.md](../research/mycelium-transpile-snapshot/PROVENANCE.md)."
+    },
+    {
+      "anchor": "py2mycmap",
+      "family": "doc",
+      "kind": "section",
+      "title": "Python → Mycelium-native mapping",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 1,
+      "tag": "Empirical/Declared",
+      "status": "0.x scaffolding (this PR)",
+      "summary": "Status: 0.x scaffolding (this PR)"
+    },
+    {
+      "anchor": "py2mycmap--intent",
+      "family": "doc",
+      "kind": "section",
+      "title": "Intent",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 8,
+      "tag": "Empirical/Declared",
+      "summary": "Close gaps so a pipeline of Python → Mycelium-native can skip an interim"
+    },
+    {
+      "anchor": "py2mycmap--common-interface-stable",
+      "family": "doc",
+      "kind": "section",
+      "title": "Common interface (stable)",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 14,
+      "tag": "Empirical/Declared",
+      "summary": "Coverage is assessable: Mapped / (Mapped + Unmappable) over"
+    },
+    {
+      "anchor": "py2mycmap--module-ownership",
+      "family": "doc",
+      "kind": "section",
+      "title": "Module ownership",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 27,
+      "tag": "Empirical/Declared",
+      "summary": "1. Added the stable mapping contract (interface)."
+    },
+    {
+      "anchor": "py2mycmap--what-changed-in-this-pr",
+      "family": "doc",
+      "kind": "section",
+      "title": "What changed in this PR",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 36,
+      "tag": "Empirical/Declared",
+      "summary": "1. Added the stable mapping contract (interface)."
+    },
+    {
+      "anchor": "py2mycmap--what-this-does-not-do",
+      "family": "doc",
+      "kind": "section",
+      "title": "What this does **not** do",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 44,
+      "tag": "Empirical/Declared",
+      "summary": "- Does not modify Mycelium grammar or evaluator ({ a; b } surface work is"
+    },
+    {
+      "anchor": "py2mycmap--taxonomy-snapshot-high-level",
+      "family": "doc",
+      "kind": "section",
+      "title": "Taxonomy snapshot (high level)",
+      "file": "docs/PY2MYC_MAP.md",
+      "line": 52,
+      "tag": "Empirical/Declared",
+      "summary": "See fixtures/mycmap/README.md for the row table. Run:"
     },
     {
       "anchor": "roadmap",
@@ -213,6 +631,16 @@
       "line": 17,
       "tag": "Empirical/Declared",
       "summary": "- cabal-devmelopner integration + tero for transpiler hints"
+    },
+    {
+      "anchor": "roadmap--wave-m-python-mycelium-native-map-gap-closure-scaffolding",
+      "family": "doc",
+      "kind": "section",
+      "title": "Wave M — Python → Mycelium-native map (gap closure scaffolding)",
+      "file": "docs/ROADMAP.md",
+      "line": 22,
+      "tag": "Empirical/Declared",
+      "summary": "- Stable contract: PyConstruct / MycForm / Guarantee / Citation / MapOutcome"
     }
   ],
   "flagged": []
