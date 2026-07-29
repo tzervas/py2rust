@@ -848,6 +848,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn module_literal_assign_emits_const() {
         let src = r#"
 x = 1
@@ -972,7 +973,7 @@ x = 2
 
     #[test]
     fn augassign_blocks_const() {
-        let (r, rust) = transpile_source("x = 1
+        let (_r, rust) = transpile_source("x = 1
 x += 1
 ", "aug.py", None).unwrap();
         assert!(
