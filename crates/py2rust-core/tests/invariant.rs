@@ -384,3 +384,63 @@ def double_list(xs: list[int]) -> list[int]:
         report.gaps
     );
 }
+
+#[test]
+fn for_range_and_break_continue_lower() {
+    let src = r#"
+def sum_range(n: int) -> int:
+    total = 0
+    for i in range(n):
+        if i == 0:
+            continue
+        if i > 100:
+            break
+        total = total + i
+    return total
+
+def sum_slice(a: int, b: int) -> int:
+    s = 0
+    for i in range(a, b):
+        s = s + i
+    return s
+"#;
+    let (report, rust) = transpile_source(src, "for_range.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "for/range bodies should lower: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
+        "expected for/range/break/continue:\n{rust}"
+    );
+    assert!(
+        rust.contains("for i in a..b"),
+        "range(a,b) → a..b:\n{rust}"
+    );
+}
+
+#[test]
+fn collections_abc_and_pathlib_imports_erase() {
+    let src = r#"
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+def id_path(p: Path) -> Path:
+    return p
+"#;
+    let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
+    assert!(
+        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        "type-only imports should erase: {:?}",
+        report.emitted_items
+    );
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::Import),
+        "collections.abc / pathlib must not Import-gap: {:?}",
+        report.gaps
+    );
+}

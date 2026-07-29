@@ -279,7 +279,16 @@ pub fn map_or_default(expr: Option<&ast::Expr>, default: &str) -> Result<String,
 /// that leave no runtime residue once annotations are resolved. Recording them
 /// as Import gaps inflated DynamicTyping-adjacent noise on every annotated file.
 pub fn is_erasable_import_module(module: &str) -> bool {
-    matches!(module, "__future__" | "typing" | "typing_extensions")
+    // Type-only / annotation-surface modules: leave no Rust residue once types map.
+    // Runtime-using imports (json, sys, re, …) stay gapped until a real use-map lands.
+    matches!(
+        module,
+        "__future__"
+            | "typing"
+            | "typing_extensions"
+            | "collections.abc"
+            | "pathlib" // Path maps as PathBuf by bare name; runtime pathlib APIs still gap at call
+    )
 }
 
 #[cfg(test)]

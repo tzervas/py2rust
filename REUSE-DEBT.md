@@ -1,10 +1,14 @@
 # REUSE debt — py2rust (P24f bootstrap)
 
-All REUSE debt has been fully paid off. All files in the repository, including those previously listed as missing copyright and licensing information, are now annotated under the aggregate P24f REUSE package-level configuration.
+**Status:** Compliant (`reuse lint` clean) as of 2026-07-29.
+
+Coverage is via aggregate annotations in `REUSE.toml` (including `crates/**`).
+File-level SPDX headers may be added incrementally; do not mass-rewrite.
 
 Copyright: 2026 Tyler Zervas — SPDX-License-Identifier: MIT
 
-## Debt Status
+## History
 
-- **Resolved**: All previously unannotated files (such as `.devcontainer/devcontainer.json`, `.github/labeler.yml`, `.github/workflows/`, `.python-version`, and `py2rust.code-workspace`) have been added to the aggregate `[[annotations]]` paths in `REUSE.toml`.
-- **Status**: Paid Off.
+- P24f bootstrap covered top-level paths; Rust workspace under `crates/` was
+  still unannotated until `crates/**` was added (closes fleet-gap #13 residual
+  after Jules #36).

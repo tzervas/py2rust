@@ -228,7 +228,7 @@ fn is_known_type(t: &str) -> bool {
 pub type TypeEnv = std::collections::HashMap<String, String>;
 
 /// Lower a function body. Multi-statement: assign / ann-assign / if / while /
-/// pass / return. Anything else declines the whole body (flag, not partial guess).
+/// for / pass / return / break / continue. Anything else declines the whole body.
 fn try_lower_body(
     body: &[ast::Stmt],
     ret_is_unit: bool,
@@ -354,6 +354,16 @@ fn try_lower_body(
                 let block = lower_while(w, &local_env, ret_ty)?;
                 lines.push(block);
             }
+            ast::Stmt::For(f) => {
+                let block = lower_for(f, &local_env, ret_ty)?;
+                lines.push(block);
+            }
+            ast::Stmt::Break(_) => {
+                lines.push("    break;".into());
+            }
+            ast::Stmt::Continue(_) => {
+                lines.push("    continue;".into());
+            }
             _ => return None,
         }
     }
@@ -419,6 +429,56 @@ fn lower_while(w: &ast::StmtWhile, env: &TypeEnv, ret_ty: Option<&str>) -> Optio
     let body = try_lower_body(&w.body, true, env, ret_ty)?;
     let body_inner = indent_block(&body);
     Some(format!("    while {test} {{\n{body_inner}    }}"))
+}
+
+/// `for x in iterable:` — only shapes we can lower honestly:
+/// - `range(n)` → `0..n`
+/// - `range(a, b)` → `a..b` (step ≠ 1 declined)
+/// - bare name / simple expr that already lowers → `for x in <expr>`
+///
+/// for/else declined (Python-only). Unpacking targets declined.
+fn lower_for(f: &ast::StmtFor, env: &TypeEnv, ret_ty: Option<&str>) -> Option<String> {
+    if !f.orelse.is_empty() {
+        return None;
+    }
+    let target = match f.target.as_ref() {
+        ast::Expr::Name(n) => n.id.to_string(),
+        _ => return None,
+    };
+    let (rs_target, fix) = rust_ident(&target);
+    if matches!(fix, IdentFix::Renamed) {
+        return None;
+    }
+    let iter = lower_for_iter(f.iter.as_ref(), env)?;
+    let body = try_lower_body(&f.body, true, env, ret_ty)?;
+    let body_inner = indent_block(&body);
+    Some(format!(
+        "    for {rs_target} in {iter} {{\n{body_inner}    }}"
+    ))
+}
+
+fn lower_for_iter(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
+    // range(...) special-case — the free win on every numeric loop in the corpus.
+    if let ast::Expr::Call(c) = expr {
+        if let ast::Expr::Name(n) = c.func.as_ref() {
+            if n.id.as_str() == "range" && c.keywords.is_empty() {
+                return match c.args.len() {
+                    1 => {
+                        let end = lower_simple_expr_in(&c.args[0], env, Some("i64"))?;
+                        Some(format!("0..{end}"))
+                    }
+                    2 => {
+                        let start = lower_simple_expr_in(&c.args[0], env, Some("i64"))?;
+                        let end = lower_simple_expr_in(&c.args[1], env, Some("i64"))?;
+                        Some(format!("{start}..{end}"))
+                    }
+                    // step requires step_by(usize) and sign handling — decline for honesty
+                    _ => None,
+                };
+            }
+        }
+    }
+    lower_simple_expr_in(expr, env, None)
 }
 
 fn indent_block(block: &str) -> String {

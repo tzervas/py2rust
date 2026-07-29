@@ -1,0 +1,3 @@
+batch: 91 files, 91 parsed, 2865 gaps, L3 91/91 compile, 13 of those with no todo!() body
+  full     -> research/corpus/tg-agent-relay-20260729/corpus-report.md
+  priority -> research/corpus/tg-agent-relay-20260729/priority-report.md
