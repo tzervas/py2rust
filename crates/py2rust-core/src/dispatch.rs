@@ -251,6 +251,18 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
                 .as_ref()
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| ".".into());
+            // Relative imports (level > 0) are package-local — never map to absolute
+            // stdlib `use` lines even if the last segment is `sys`/`os`/…
+            let level = i.level.as_ref().map(|l| l.to_u32()).unwrap_or(0);
+            if level > 0 {
+                return Outcome::Gapped {
+                    category: Category::Import,
+                    reason: format!(
+                        "relative from {mod_name} import … (level={level}) not resolved — flag not guess"
+                    ),
+                    item_name: Some(mod_name),
+                };
+            }
             if is_erasable_import_module(&mod_name) {
                 return Outcome::Emitted(Emitted {
                     name: format!("{ERASE_PREFIX}from:{mod_name}"),
@@ -261,7 +273,8 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
             if let Some(use_block) = is_mappable_import(&mod_name) {
                 return Outcome::Emitted(Emitted {
                     name: format!("{IMPORT_MAP_PREFIX}from:{mod_name}"),
-                    rust: use_block + "\n",
+                    rust: use_block + "
+",
                     sub_gaps: vec![],
                 });
             }
@@ -628,4 +641,51 @@ mod tests {
             gap.reason
         );
     }
+    #[test]
+    fn relative_from_sys_does_not_map_to_std() {
+        // Package-relative `.sys` is NOT the stdlib — must not emit use std::env.
+        let (r, rust) = transpile_source("from .sys import argv
+", "rel.py", None).unwrap();
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::Import),
+            "relative import must Import-gap: {:?}",
+            r.gaps
+        );
+        assert!(
+            !rust.contains("use std::env"),
+            "relative from .sys must not emit stdlib use:
+{rust}"
+        );
+        assert!(
+            !r.emitted_items
+                .iter()
+                .any(|n| n.starts_with(IMPORT_MAP_PREFIX)),
+            "relative must not #import-map: {:?}",
+            r.emitted_items
+        );
+    }
+
+    #[test]
+    fn absolute_from_sys_maps_like_import_sys() {
+        let (r, rust) = transpile_source("from sys import argv
+", "fromsys.py", None).unwrap();
+        assert!(
+            r.emitted_items
+                .iter()
+                .any(|n| n == &format!("{IMPORT_MAP_PREFIX}from:sys")),
+            "absolute from sys should map: {:?}",
+            r.emitted_items
+        );
+        assert!(
+            rust.contains("use std::env;"),
+            "expected use std::env; got:
+{rust}"
+        );
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::Import),
+            "absolute from sys must not Import-gap: {:?}",
+            r.gaps
+        );
+    }
+
 }
