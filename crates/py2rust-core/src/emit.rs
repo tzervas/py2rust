@@ -5,7 +5,6 @@ use crate::gap::{Category, GapReason};
 use crate::map::{is_any_annotation, map_type_expr, rust_ident, IdentFix};
 use rustpython_parser::ast::{self, Ranged};
 
-
 /// Result of attempting to emit a construct.
 #[derive(Debug, Clone)]
 pub struct Emitted {
@@ -330,25 +329,8 @@ fn try_lower_body(
                 }
                 let want = local_env.get(&name).cloned();
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
-                let op = match a.op {
-                    ast::Operator::Add => "+=",
-                    ast::Operator::Sub => "-=",
-                    ast::Operator::Mult => "*=",
-                    ast::Operator::Div => "/=",
-                    ast::Operator::Mod => "%=",
-                    ast::Operator::BitOr => "|=",
-                    ast::Operator::BitXor => "^=",
-                    ast::Operator::BitAnd => "&=",
-                    ast::Operator::LShift => "<<=",
-                    ast::Operator::RShift => ">>=",
-                    _ => return None,
-                };
-                // AugAssign needs `let mut` on first bind; we don't track mut yet.
-                // Only allow when the name is already in env (parameter or prior assign).
-                // Prior `let x = …` is immutable — decline rather than emit invalid Rust.
-                // Parameters can be reassigned in Python; in Rust we need mut.
-                // Conservative: only lower aug-assign on names already present as params
-                // by rewriting as `let name = name op rhs` (shadow), which is always legal.
+                // No mut tracking yet: rewrite `x += rhs` as shadow `let x = (x + rhs)`,
+                // which is always legal Rust. Decline unsupported ops rather than invent mut.
                 let bin = match a.op {
                     ast::Operator::Add => "+",
                     ast::Operator::Sub => "-",
@@ -362,7 +344,6 @@ fn try_lower_body(
                     ast::Operator::RShift => ">>",
                     _ => return None,
                 };
-                let _ = op;
                 lines.push(format!("    let {rs_name} = ({rs_name} {bin} {rhs});"));
             }
             ast::Stmt::If(i) => {

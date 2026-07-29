@@ -18,7 +18,6 @@ const SNIPPET_MAX: usize = 200;
 /// Counted for never-silent; excluded from L1/L2 numerators in GapReport.
 pub const ERASE_PREFIX: &str = "#erase:";
 
-
 #[derive(Debug, Error)]
 pub enum DispatchError {
     #[error("Python parse error in {file}: {message}")]
