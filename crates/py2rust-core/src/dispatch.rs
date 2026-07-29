@@ -6,7 +6,7 @@
 
 use crate::emit::{class_gap_reason, emit_function, Emitted};
 use crate::gap::{Category, Gap, GapReport};
-use crate::map::is_erasable_import_module;
+use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_import};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
@@ -17,6 +17,9 @@ const SNIPPET_MAX: usize = 200;
 /// Synthetic emitted-name prefix for erasable imports (no Rust residue).
 /// Counted for never-silent; excluded from L1/L2 numerators in GapReport.
 pub const ERASE_PREFIX: &str = "#erase:";
+
+/// Synthetic emitted-name prefix for stdlib imports lowered to `use` lines.
+pub const IMPORT_MAP_PREFIX: &str = "#import:";
 
 #[derive(Debug, Error)]
 pub enum DispatchError {
@@ -215,12 +218,30 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
                     sub_gaps: vec![],
                 });
             }
-            Outcome::Gapped {
-                category: Category::Import,
-                reason: format!(
+            // High-frequency stdlib → honest `use` scaffolding (no new crate deps).
+            if !names.is_empty() {
+                let mapped: Option<Vec<String>> =
+                    names.iter().map(|n| is_mappable_import(n)).collect();
+                if let Some(uses) = mapped {
+                    return Outcome::Emitted(Emitted {
+                        name: format!("{IMPORT_MAP_PREFIX}{}", names.join(",")),
+                        rust: uses.join("\n") + "\n",
+                        sub_gaps: vec![],
+                    });
+                }
+            }
+            // Unmapped / crate-backed: Import gap with module-specific reason.
+            let reason = if names.len() == 1 {
+                import_gap_reason(&names[0])
+            } else {
+                format!(
                     "import {} not lowered — unresolved / unmapped import (flag not guess)",
                     names.join(", ")
-                ),
+                )
+            };
+            Outcome::Gapped {
+                category: Category::Import,
+                reason,
                 item_name: names.first().cloned(),
             }
         }
@@ -237,11 +258,16 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
                     sub_gaps: vec![],
                 });
             }
+            if let Some(use_block) = is_mappable_import(&mod_name) {
+                return Outcome::Emitted(Emitted {
+                    name: format!("{IMPORT_MAP_PREFIX}from:{mod_name}"),
+                    rust: use_block + "\n",
+                    sub_gaps: vec![],
+                });
+            }
             Outcome::Gapped {
                 category: Category::Import,
-                reason: format!(
-                    "from {mod_name} import … not lowered — unresolved / unmapped import"
-                ),
+                reason: format!("from {mod_name} import … — {}", import_gap_reason(&mod_name)),
                 item_name: Some(mod_name),
             }
         }
@@ -534,5 +560,72 @@ mod tests {
         // Emitted with DynamicTyping sub_gap(s)
         assert!(r.emitted_items.iter().any(|n| n == "f"));
         assert!(r.gaps.iter().any(|g| g.category == Category::DynamicTyping));
+    }
+
+    #[test]
+    fn import_sys_emits_use_std_env() {
+        let (r, rust) = transpile_source("import sys\n", "sys.py", None).unwrap();
+        assert!(
+            r.emitted_items
+                .iter()
+                .any(|n| n == &format!("{IMPORT_MAP_PREFIX}sys")),
+            "sys should emit as mapped import: {:?}",
+            r.emitted_items
+        );
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::Import),
+            "mappable sys must not leave Import gap: {:?}",
+            r.gaps
+        );
+        assert!(
+            rust.contains("use std::env;"),
+            "expected use std::env; got:\n{rust}"
+        );
+        assert!(
+            rust.contains("partial"),
+            "sys mapping must note partial coverage:\n{rust}"
+        );
+    }
+
+    #[test]
+    fn import_unknown_still_gaps() {
+        let (r, rust) =
+            transpile_source("import totally_unknown_mod\n", "unknown.py", None).unwrap();
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::Import),
+            "unknown import must Import-gap: {:?}",
+            r.gaps
+        );
+        assert!(
+            !r.emitted_items
+                .iter()
+                .any(|n| n.starts_with(IMPORT_MAP_PREFIX)),
+            "unknown must not map: {:?}",
+            r.emitted_items
+        );
+        assert!(
+            !rust.contains("use std::"),
+            "unknown import must not invent use lines:\n{rust}"
+        );
+        let reason = &r.gaps[0].reason;
+        assert!(
+            reason.contains("totally_unknown_mod") && reason.contains("unmapped"),
+            "reason should name the module: {reason}"
+        );
+    }
+
+    #[test]
+    fn import_json_gaps_with_serde_hint() {
+        let (r, _) = transpile_source("import json\n", "json.py", None).unwrap();
+        let gap = r
+            .gaps
+            .iter()
+            .find(|g| g.category == Category::Import)
+            .expect("json stays Import-gapped");
+        assert!(
+            gap.reason.contains("serde_json"),
+            "json gap should point at crate: {}",
+            gap.reason
+        );
     }
 }
