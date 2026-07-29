@@ -20,8 +20,8 @@ packages = ["src/py2rust"]
 [project.scripts]
 py2rust = "py2rust.cli:main"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=7.0.0",
     "ruff>=0.9.0",
     "black>=23.0.0",
