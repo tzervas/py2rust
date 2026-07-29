@@ -565,3 +565,48 @@ x_dyn = unknown()
         report.gaps
     );
 }
+
+#[test]
+fn simple_list_comprehension_lowers() {
+    let src = r#"
+def map_double(xs: list[int]) -> list[int]:
+    return [x * 2 for x in xs]
+
+def filter_pos(xs: list[int]) -> list[int]:
+    return [x for x in xs if x > 0]
+
+def identity(xs: list[int]) -> list[int]:
+    return [x for x in xs]
+"#;
+    let (report, rust) = transpile_source(src, "compr.py", None).unwrap();
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "simple list comps must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    assert!(rust.contains(".into_iter()"), "iter chain: {rust}");
+    assert!(rust.contains(".map("), "map: {rust}");
+    assert!(rust.contains(".filter("), "filter: {rust}");
+    assert!(rust.contains(".collect::<Vec<_>>()"), "collect: {rust}");
+    // identity skips map
+    assert!(
+        rust.contains("xs.into_iter().collect::<Vec<_>>()")
+            || rust.contains("xs.into_iter().filter"),
+        "identity or filter-only path: {rust}"
+    );
+}
+
+#[test]
+fn nested_list_comprehension_declines() {
+    let src = r#"
+def nest(xss: list[list[int]]) -> list[int]:
+    return [x for xs in xss for x in xs]
+"#;
+    let (report, _) = transpile_source(src, "nest.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "nested gens must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+

@@ -830,8 +830,58 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             }
             Some(format!("vec![{}]", parts.join(", ")))
         }
+        ast::Expr::ListComp(lc) => lower_list_comp(lc, env),
         _ => None,
     }
+}
+
+/// Simple list comprehensions only: one generator, `Name` target, no async.
+///
+/// `[elt for x in xs]` → `xs.into_iter().map(|x| elt).collect::<Vec<_>>()`
+/// `[x for x in xs if p]` → filter then map/collect.
+/// Nested generators, unpack targets, and set/dict/genexps stay unlowered.
+fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
+    if lc.generators.len() != 1 {
+        return None;
+    }
+    let g = &lc.generators[0];
+    if g.is_async {
+        return None;
+    }
+    let target = match &g.target {
+        ast::Expr::Name(n) => n.id.to_string(),
+        _ => return None,
+    };
+    let (rs_t, fix) = rust_ident(&target);
+    if matches!(fix, IdentFix::Renamed) {
+        return None;
+    }
+    let iter = lower_simple_expr_in(&g.iter, env, None)?;
+    // Bind the loop var so names inside elt/ifs lower (type unknown — rustc decides).
+    let mut local = env.clone();
+    local.insert(target.clone(), "/* dyn */".into());
+
+    let mut chain = format!("{iter}.into_iter()");
+    if !g.ifs.is_empty() {
+        let mut conds = Vec::new();
+        for pred in &g.ifs {
+            conds.push(lower_simple_expr_in(pred, &local, Some("bool"))?);
+        }
+        let cond = if conds.len() == 1 {
+            conds[0].clone()
+        } else {
+            format!("({})", conds.join(" && "))
+        };
+        chain.push_str(&format!(".filter(|{rs_t}| {cond})"));
+    }
+    // Identity `[x for x in xs]` skips map.
+    let is_identity = matches!(lc.elt.as_ref(), ast::Expr::Name(n) if n.id.as_str() == target);
+    if !is_identity {
+        let elt = lower_simple_expr_in(lc.elt.as_ref(), &local, None)?;
+        chain.push_str(&format!(".map(|{rs_t}| {elt})"));
+    }
+    chain.push_str(".collect::<Vec<_>>()");
+    Some(chain)
 }
 
 /// Render a Python constant as Rust, honouring an expected type for numerics.
