@@ -584,15 +584,30 @@ def identity(xs: list[int]) -> list[int]:
         "simple list comps must not FunctionBody-gap: {:?}",
         report.gaps
     );
-    assert!(rust.contains(".into_iter()"), "iter chain: {rust}");
-    assert!(rust.contains(".map("), "map: {rust}");
-    assert!(rust.contains(".filter("), "filter: {rust}");
-    assert!(rust.contains(".collect::<Vec<_>>()"), "collect: {rust}");
-    // identity skips map
     assert!(
-        rust.contains("xs.into_iter().collect::<Vec<_>>()")
-            || rust.contains("xs.into_iter().filter"),
-        "identity or filter-only path: {rust}"
+        !report.gaps.iter().any(|g| g.category == Category::Comprehension),
+        "successfully lowered list comps must not leave Comprehension gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("xs.into_iter().map(|x| (x * 2)).collect::<Vec<_>>()"),
+        "map path: {rust}"
+    );
+    assert!(
+        rust.contains("xs.into_iter().filter(|x| (x > 0)).collect::<Vec<_>>()"),
+        "filter identity path: {rust}"
+    );
+    // identity: collect only, no map
+    assert!(
+        rust.contains("xs.into_iter().collect::<Vec<_>>()"),
+        "identity collect: {rust}"
+    );
+    // Isolate identity function body — must not introduce map for bare x
+    let id_start = rust.find("fn identity").expect("identity fn");
+    let id_body = &rust[id_start..];
+    assert!(
+        !id_body.contains(".map("),
+        "identity must skip map: {id_body}"
     );
 }
 

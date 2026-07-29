@@ -835,27 +835,37 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
     }
 }
 
+
+/// Shape gate shared by emit + walk: what Wave B #52 actually lowers.
+fn is_simple_list_comp_shape(lc: &ast::ExprListComp) -> bool {
+    if lc.generators.len() != 1 {
+        return false;
+    }
+    let g = &lc.generators[0];
+    if g.is_async {
+        return false;
+    }
+    let ast::Expr::Name(n) = &g.target else {
+        return false;
+    };
+    !matches!(rust_ident(n.id.as_str()).1, IdentFix::Renamed)
+}
+
 /// Simple list comprehensions only: one generator, `Name` target, no async.
 ///
 /// `[elt for x in xs]` → `xs.into_iter().map(|x| elt).collect::<Vec<_>>()`
 /// `[x for x in xs if p]` → filter then map/collect.
 /// Nested generators, unpack targets, and set/dict/genexps stay unlowered.
 fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
-    if lc.generators.len() != 1 {
+    if !is_simple_list_comp_shape(lc) {
         return None;
     }
     let g = &lc.generators[0];
-    if g.is_async {
-        return None;
-    }
     let target = match &g.target {
         ast::Expr::Name(n) => n.id.to_string(),
         _ => return None,
     };
-    let (rs_t, fix) = rust_ident(&target);
-    if matches!(fix, IdentFix::Renamed) {
-        return None;
-    }
+    let (rs_t, _) = rust_ident(&target);
     let iter = lower_simple_expr_in(&g.iter, env, None)?;
     // Bind the loop var so names inside elt/ifs lower (type unknown — rustc decides).
     let mut local = env.clone();
@@ -1181,8 +1191,18 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Expr::ListComp(lc) => {
-            out.push(comp_gap(fname, "list"));
+            // Only gap shapes we do *not* lower in `lower_list_comp`. Simple
+            // one-gen Name-target comps are real emission, not Comprehension debt.
+            if !is_simple_list_comp_shape(lc) {
+                out.push(comp_gap(fname, "list"));
+            }
             walk_expr(&lc.elt, fname, out);
+            for g in &lc.generators {
+                walk_expr(&g.iter, fname, out);
+                for pred in &g.ifs {
+                    walk_expr(pred, fname, out);
+                }
+            }
         }
         ast::Expr::SetComp(sc) => {
             out.push(comp_gap(fname, "set"));
