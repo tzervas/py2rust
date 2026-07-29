@@ -527,3 +527,41 @@ def id_path(p: Path) -> Path:
         report.gaps
     );
 }
+
+/// Issue #51: module-level literal assignments lower to Rust `const` items.
+#[test]
+fn module_level_literal_assign_emits_const() {
+    let src = r#"
+x = 1
+s = "hi"
+b = True
+f = 1.5
+COUNT: int = 42
+NAME: str = "ok"
+x_dyn = unknown()
+"#;
+    let (report, rust) = transpile_source(src, "mod_lit.py", Some("mod_lit")).unwrap();
+    assert!(report.never_silent_holds());
+    for name in ["x", "s", "b", "f", "COUNT", "NAME"] {
+        assert!(
+            report.emitted_items.iter().any(|n| n == name),
+            "expected const emit for {name}: {:?}",
+            report.emitted_items
+        );
+    }
+    assert!(rust.contains("const x: i64 = 1;"), "rust:\n{rust}");
+    assert!(rust.contains("const s: &str = \"hi\";"), "rust:\n{rust}");
+    assert!(rust.contains("const b: bool = true;"), "rust:\n{rust}");
+    assert!(rust.contains("const COUNT: i64 = 42;"), "rust:\n{rust}");
+    assert!(rust.contains("const NAME: &str = \"ok\";"), "rust:\n{rust}");
+    // Non-literal stays honest DynamicTyping gap.
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::DynamicTyping
+                && g.item_name.as_deref() == Some("x_dyn")),
+        "non-literal must DynamicTyping-gap: {:?}",
+        report.gaps
+    );
+}
