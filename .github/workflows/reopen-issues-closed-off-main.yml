@@ -1,12 +1,26 @@
 # GitHub natively closes issues on merge for any base branch when PR uses Closes #n.
 # This workflow reopens issues closed by merges into non-main branches so epics/tasks
 # stay open until delivered to trunk.
+#
+# Exit honesty (scripts/reopen-linked-issues-off-main.sh):
+#   GREEN — no closing keywords / already open / base=main leave-closed / reopens succeeded
+#   RED   — self-test fail, API/auth fail, missing issue ref, or reopen PATCH didn't stick
+# There is no always-green noop job.
 name: reopen-issues-closed-off-main
 
 on:
   pull_request:
     types: [closed]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to evaluate (reopen path / dry classification)"
+        type: string
+        required: true
+      dry_run:
+        description: "Report actions without reopening"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -14,58 +28,31 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Always-green gate so skipped evaluations never mark the run red with zero jobs.
-  # ubuntu-latest: pure API bookkeeping; must not depend on self-hosted fleet capacity.
-  gate:
-    name: gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: noop
-        run: echo "reopen workflow loaded"
-
   reopen:
     name: Reopen issues closed off-main
-    needs: [gate]
+    # ubuntu-latest: pure API bookkeeping; must not depend on self-hosted fleet capacity.
     runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.base.ref != 'main' &&
-      github.event.pull_request.base.ref != 'master'
     steps:
-      - name: Reopen linked issues
+      - uses: actions/checkout@v4
+
+      - name: Self-test + classify/reopen (green only if real work succeeds)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          BASE: ${{ github.event.pull_request.base.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR: ${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.pull_request.number }}
+          DRY_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: |
           set -euo pipefail
-          body=$(gh api "repos/$REPO/pulls/$PR" --jq .body)
-          title=$(gh api "repos/$REPO/pulls/$PR" --jq .title)
-          # Keyword + #N extraction without a column-0 heredoc (that breaks YAML block scalars).
-          nums=$(
-            printf '%s\n%s\n' "$title" "$body" \
-              | tr '[:upper:]' '[:lower:]' \
-              | grep -oE '(fix(e[sd])?|close[sd]?|resolve[sd]?)[[:space:]:]*#[0-9]+([,[:space:]&]+#[0-9]+)*' \
-              | grep -oE '[0-9]+' \
-              | sort -n \
-              | uniq \
-              || true
-          )
-          if [ -z "${nums}" ]; then
-            echo "No closing keywords — nothing to reopen"
-            exit 0
+          if [ ! -f scripts/reopen-linked-issues-off-main.sh ]; then
+            echo "::error::scripts/reopen-linked-issues-off-main.sh missing" >&2
+            exit 1
           fi
-          while IFS= read -r n; do
-            [ -z "$n" ] && continue
-            state=$(gh api "repos/$REPO/issues/$n" --jq .state 2>/dev/null || echo missing)
-            if [ "$state" = "closed" ]; then
-              gh api -X PATCH "repos/$REPO/issues/$n" -f state=open >/dev/null
-              gh api -X POST "repos/$REPO/issues/$n/comments" \
-                -f body="Reopened automatically: closing keywords on PR #${PR} merged into \`${BASE}\` (not main). Issues close only when work reaches **main**. Prefer \`Refs #${n}\` on non-main PRs." >/dev/null
-              echo "reopened #$n"
-            else
-              echo "skip #$n state=$state"
-            fi
-          done <<< "$nums"
+          if [ -z "${PR}" ]; then
+            echo "::error::no PR number in event payload" >&2
+            exit 1
+          fi
+          args=(--pr "$PR")
+          if [ "${DRY_INPUT}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          bash scripts/reopen-linked-issues-off-main.sh "${args[@]}"
