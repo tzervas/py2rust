@@ -6,12 +6,17 @@
 
 use crate::emit::{class_gap_reason, emit_function, Emitted};
 use crate::gap::{Category, Gap, GapReport};
+use crate::map::is_erasable_import_module;
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
 use thiserror::Error;
 
 const SNIPPET_MAX: usize = 200;
+
+/// Synthetic emitted-name prefix for erasable imports (no Rust residue).
+/// Counted for never-silent; excluded from L1/L2 numerators in GapReport.
+pub const ERASE_PREFIX: &str = "#erase:";
 
 #[derive(Debug, Error)]
 pub enum DispatchError {
@@ -83,7 +88,9 @@ pub fn transpile_source(
 
         match dispatch_stmt(stmt, source) {
             Outcome::Emitted(em) => {
-                chunks.push(em.rust);
+                if !em.rust.is_empty() {
+                    chunks.push(em.rust);
+                }
                 report.emitted_items.push(em.name.clone());
                 for sg in em.sub_gaps {
                     report.gaps.push(Gap::new(
@@ -200,6 +207,14 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
         },
         ast::Stmt::Import(i) => {
             let names: Vec<_> = i.names.iter().map(|a| a.name.to_string()).collect();
+            // typing / __future__ leave no runtime residue once annotations resolve.
+            if !names.is_empty() && names.iter().all(|n| is_erasable_import_module(n)) {
+                return Outcome::Emitted(Emitted {
+                    name: format!("{ERASE_PREFIX}{}", names.join(",")),
+                    rust: String::new(),
+                    sub_gaps: vec![],
+                });
+            }
             Outcome::Gapped {
                 category: Category::Import,
                 reason: format!(
@@ -215,6 +230,13 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str) -> Outcome {
                 .as_ref()
                 .map(|m| m.to_string())
                 .unwrap_or_else(|| ".".into());
+            if is_erasable_import_module(&mod_name) {
+                return Outcome::Emitted(Emitted {
+                    name: format!("{ERASE_PREFIX}from:{mod_name}"),
+                    rust: String::new(),
+                    sub_gaps: vec![],
+                });
+            }
             Outcome::Gapped {
                 category: Category::Import,
                 reason: format!(

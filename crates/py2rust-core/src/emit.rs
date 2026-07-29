@@ -150,16 +150,14 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     // Nested honesty: scan body for exception / metaprogramming / lambda.
     scan_body_for_sub_gaps(&func.body, &name, &mut sub_gaps);
 
-    // Only unambiguous scalars enter the environment. A parameter whose type was
-    // a placeholder (`/* dyn */ i32`) is left out so inference declines instead
-    // of reasoning from a guess — the same rule the gap report follows.
+    // Only known types enter the environment. Placeholders (`/* dyn */ i32`)
+    // stay out so inference declines instead of reasoning from a guess.
     let env: TypeEnv = arg_types
         .into_iter()
-        .filter(|(_, t)| matches!(t.as_str(), "i64" | "f64" | "bool" | "String"))
+        .filter(|(_, t)| is_known_type(t))
         .collect();
-    let ret_scalar =
-        matches!(ret_ty.as_str(), "i64" | "f64" | "bool" | "String").then(|| ret_ty.clone());
-    let body_lowered = try_lower_simple_body(&func.body, ret_is_unit, &env, ret_scalar.as_deref());
+    let ret_known = is_known_type(&ret_ty).then(|| ret_ty.clone());
+    let body_lowered = try_lower_body(&func.body, ret_is_unit, &env, ret_known.as_deref());
     let body_text = match body_lowered {
         Some(b) => b,
         None => {
@@ -209,7 +207,29 @@ fn is_pass_only_body(body: &[ast::Stmt]) -> bool {
     body.iter().all(|s| matches!(s, ast::Stmt::Pass(_)))
 }
 
-fn try_lower_simple_body(
+/// Types we will put in the TypeEnv / treat as known for inference.
+fn is_known_type(t: &str) -> bool {
+    matches!(
+        t,
+        "i64" | "f64" | "bool" | "String" | "()" | "Vec<u8>" | "!"
+    ) || t.starts_with("Vec<")
+        || t.starts_with("Option<")
+        || t.starts_with("std::collections::HashMap<")
+        || t.starts_with("std::collections::HashSet<")
+        || t.starts_with("std::path::")
+        || (t.starts_with('(') && t.ends_with(')'))
+}
+
+/// What is known about the names in scope: parameter/local name → emitted Rust type.
+///
+/// Only unambiguous known types are recorded. A parameter whose type was a guess
+/// (`/* dyn */ i32`) is deliberately absent, so inference declines rather than
+/// reasoning from a placeholder.
+pub type TypeEnv = std::collections::HashMap<String, String>;
+
+/// Lower a function body. Multi-statement: assign / ann-assign / if / while /
+/// pass / return. Anything else declines the whole body (flag, not partial guess).
+fn try_lower_body(
     body: &[ast::Stmt],
     ret_is_unit: bool,
     env: &TypeEnv,
@@ -222,21 +242,6 @@ fn try_lower_simple_body(
     if body.len() == 1 && matches!(&body[0], ast::Stmt::Pass(_)) {
         return Some(String::new());
     }
-    // Single return of constant / name / simple binop
-    if body.len() == 1 {
-        if let ast::Stmt::Return(r) = &body[0] {
-            match r.value.as_deref() {
-                None => return Some(String::new()),
-                Some(expr) => {
-                    // The return type is the expected type for the whole
-                    // expression — that is what makes `return 3600` from a
-                    // `-> float` lower to `3600.0` rather than to E0308.
-                    let lit = lower_simple_expr_in(expr, env, ret_ty)?;
-                    return Some(format!("    {lit}\n"));
-                }
-            }
-        }
-    }
     // Unit body of only pass / bare returns
     if ret_is_unit
         && body.iter().all(|s| {
@@ -246,15 +251,202 @@ fn try_lower_simple_body(
     {
         return Some(String::new());
     }
-    None
+
+    let mut local_env = env.clone();
+    let mut lines: Vec<String> = Vec::new();
+    let last = body.len() - 1;
+
+    for (i, stmt) in body.iter().enumerate() {
+        let is_tail = i == last;
+        match stmt {
+            ast::Stmt::Pass(_) => continue,
+            ast::Stmt::Return(r) => {
+                match r.value.as_deref() {
+                    None => {
+                        if ret_is_unit {
+                            if !is_tail {
+                                lines.push("    return;".into());
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                    Some(expr) => {
+                        let lit = lower_simple_expr_in(expr, &local_env, ret_ty)?;
+                        if is_tail {
+                            // Tail return becomes the block value (no `return` keyword).
+                            lines.push(format!("    {lit}"));
+                        } else {
+                            lines.push(format!("    return {lit};"));
+                        }
+                    }
+                }
+            }
+            ast::Stmt::Assign(a) => {
+                if a.targets.len() != 1 {
+                    return None;
+                }
+                let name = match &a.targets[0] {
+                    ast::Expr::Name(n) => n.id.to_string(),
+                    _ => return None,
+                };
+                let (rs_name, fix) = rust_ident(&name);
+                if matches!(fix, IdentFix::Renamed) {
+                    return None;
+                }
+                // Prefer type forced by RHS; fall back to existing env entry.
+                let want = forced_ty(&a.value, &local_env)
+                    .or_else(|| local_env.get(&name).cloned());
+                let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
+                if let Some(t) = want {
+                    local_env.insert(name, t);
+                }
+                lines.push(format!("    let {rs_name} = {rhs};"));
+            }
+            ast::Stmt::AnnAssign(a) => {
+                let name = match a.target.as_ref() {
+                    ast::Expr::Name(n) => n.id.to_string(),
+                    _ => return None,
+                };
+                let (rs_name, fix) = rust_ident(&name);
+                if matches!(fix, IdentFix::Renamed) {
+                    return None;
+                }
+                let ann_ty = map_type_expr(a.annotation.as_ref())?;
+                let value = a.value.as_deref()?;
+                let rhs = lower_simple_expr_in(value, &local_env, Some(&ann_ty))?;
+                local_env.insert(name, ann_ty);
+                lines.push(format!("    let {rs_name} = {rhs};"));
+            }
+            ast::Stmt::AugAssign(a) => {
+                let name = match a.target.as_ref() {
+                    ast::Expr::Name(n) => n.id.to_string(),
+                    _ => return None,
+                };
+                let (rs_name, fix) = rust_ident(&name);
+                if matches!(fix, IdentFix::Renamed) {
+                    return None;
+                }
+                let want = local_env.get(&name).cloned();
+                let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
+                // No mut tracking yet: rewrite `x += rhs` as shadow `let x = (x + rhs)`,
+                // which is always legal Rust. Decline unsupported ops rather than invent mut.
+                let bin = match a.op {
+                    ast::Operator::Add => "+",
+                    ast::Operator::Sub => "-",
+                    ast::Operator::Mult => "*",
+                    ast::Operator::Div => "/",
+                    ast::Operator::Mod => "%",
+                    ast::Operator::BitOr => "|",
+                    ast::Operator::BitXor => "^",
+                    ast::Operator::BitAnd => "&",
+                    ast::Operator::LShift => "<<",
+                    ast::Operator::RShift => ">>",
+                    _ => return None,
+                };
+                lines.push(format!("    let {rs_name} = ({rs_name} {bin} {rhs});"));
+            }
+            ast::Stmt::If(i) => {
+                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit)?;
+                lines.push(block);
+            }
+            ast::Stmt::While(w) => {
+                let block = lower_while(w, &local_env, ret_ty)?;
+                lines.push(block);
+            }
+            _ => return None,
+        }
+    }
+
+    // Non-unit functions must end in a value-producing tail.
+    if !ret_is_unit {
+        let has_value_tail = body
+            .last()
+            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .unwrap_or(false);
+        if !has_value_tail {
+            return None;
+        }
+    }
+
+    Some(lines.join("\n") + "\n")
 }
 
-/// What is known about the names in scope: parameter name → emitted Rust type.
-///
-/// Only unambiguous scalars are recorded. A parameter whose type was a guess
-/// (`/* dyn */ i32`) is deliberately absent, so inference declines rather than
-/// reasoning from a placeholder.
-pub type TypeEnv = std::collections::HashMap<String, String>;
+fn lower_if(
+    i: &ast::StmtIf,
+    env: &TypeEnv,
+    ret_ty: Option<&str>,
+    is_tail: bool,
+    ret_is_unit: bool,
+) -> Option<String> {
+    let test = lower_simple_expr_in(&i.test, env, Some("bool"))?;
+    let body = try_lower_body(&i.body, ret_is_unit, env, ret_ty)?;
+    let body_inner = indent_block(&body);
+    if i.orelse.is_empty() {
+        // Bare if without else cannot be a value-producing tail unless unit.
+        if is_tail && !ret_is_unit {
+            return None;
+        }
+        return Some(format!("    if {test} {{\n{body_inner}    }}"));
+    }
+    // `elif` chains arrive as a single Stmt::If in orelse.
+    let else_inner = if i.orelse.len() == 1 {
+        if let ast::Stmt::If(nested) = &i.orelse[0] {
+            let nested_block = lower_if(nested, env, ret_ty, is_tail, ret_is_unit)?;
+            // nested_block already has leading indent; strip one level for else arm.
+            return Some(format!(
+                "    if {test} {{\n{body_inner}    }} else {{\n{}\n    }}",
+                strip_outer_indent(&nested_block)
+            ));
+        }
+        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty)?
+    } else {
+        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty)?
+    };
+    let else_inner = indent_block(&else_inner);
+    Some(format!(
+        "    if {test} {{\n{body_inner}    }} else {{\n{else_inner}    }}"
+    ))
+}
+
+fn lower_while(w: &ast::StmtWhile, env: &TypeEnv, ret_ty: Option<&str>) -> Option<String> {
+    if !w.orelse.is_empty() {
+        // while/else is Python-specific; decline rather than drop the else.
+        return None;
+    }
+    let test = lower_simple_expr_in(&w.test, env, Some("bool"))?;
+    // Loop body is unit-ish from the outer function's POV — returns inside become `return`.
+    let body = try_lower_body(&w.body, true, env, ret_ty)?;
+    let body_inner = indent_block(&body);
+    Some(format!("    while {test} {{\n{body_inner}    }}"))
+}
+
+fn indent_block(block: &str) -> String {
+    block
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("    {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + if block.ends_with('\n') || block.is_empty() {
+            "\n"
+        } else {
+            "\n"
+        }
+}
+
+fn strip_outer_indent(block: &str) -> String {
+    block
+        .lines()
+        .map(|l| l.strip_prefix("    ").unwrap_or(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// The type an expression *forces*, ignoring anything a literal could adapt to.
 ///
@@ -317,7 +509,14 @@ fn promote(l: Option<&str>, r: Option<&str>) -> Option<String> {
 fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>) -> Option<String> {
     match expr {
         ast::Expr::Constant(c) => constant_to_rust_as(&c.value, expected),
-        ast::Expr::Name(n) => Some(n.id.to_string()),
+        ast::Expr::Name(n) => {
+            let (rs, fix) = rust_ident(n.id.as_str());
+            if matches!(fix, IdentFix::Renamed) {
+                None
+            } else {
+                Some(rs)
+            }
+        }
         ast::Expr::BinOp(b) => {
             // Both operands share a type in Rust, so settle it once and lower
             // each side against it.
@@ -405,6 +604,20 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             let orelse = lower_simple_expr_in(&i.orelse, env, want.as_deref())?;
             Some(format!("(if {test} {{ {body} }} else {{ {orelse} }})"))
         }
+        ast::Expr::Tuple(t) => {
+            let mut parts = Vec::new();
+            for e in &t.elts {
+                parts.push(lower_simple_expr_in(e, env, None)?);
+            }
+            Some(format!("({})", parts.join(", ")))
+        }
+        ast::Expr::List(l) => {
+            let mut parts = Vec::new();
+            for e in &l.elts {
+                parts.push(lower_simple_expr_in(e, env, None)?);
+            }
+            Some(format!("vec![{}]", parts.join(", ")))
+        }
         _ => None,
     }
 }
@@ -477,13 +690,13 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Stmt::Delete(d) => {
-            for target in &d.targets {
-                walk_expr(target, fname, out);
+            for t in &d.targets {
+                walk_expr(t, fname, out);
             }
         }
         ast::Stmt::Assign(a) => {
-            for target in &a.targets {
-                walk_expr(target, fname, out);
+            for t in &a.targets {
+                walk_expr(t, fname, out);
             }
             walk_expr(&a.value, fname, out);
         }
@@ -493,13 +706,11 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         }
         ast::Stmt::AnnAssign(a) => {
             walk_expr(&a.target, fname, out);
-            walk_expr(&a.annotation, fname, out);
-            if let Some(value) = &a.value {
-                walk_expr(value, fname, out);
+            if let Some(v) = &a.value {
+                walk_expr(v, fname, out);
             }
         }
         ast::Stmt::For(f) => {
-            walk_expr(&f.target, fname, out);
             walk_expr(&f.iter, fname, out);
             for s in &f.body {
                 walk_stmt(s, fname, out);
@@ -509,7 +720,10 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Stmt::AsyncFor(f) => {
-            walk_expr(&f.target, fname, out);
+            out.push(GapReason::new(
+                Category::Async,
+                format!("async for inside `{fname}`"),
+            ));
             walk_expr(&f.iter, fname, out);
             for s in &f.body {
                 walk_stmt(s, fname, out);
@@ -539,20 +753,18 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::With(w) => {
             for item in &w.items {
                 walk_expr(&item.context_expr, fname, out);
-                if let Some(optional_vars) = &item.optional_vars {
-                    walk_expr(optional_vars, fname, out);
-                }
             }
             for s in &w.body {
                 walk_stmt(s, fname, out);
             }
         }
         ast::Stmt::AsyncWith(w) => {
+            out.push(GapReason::new(
+                Category::Async,
+                format!("async with inside `{fname}`"),
+            ));
             for item in &w.items {
                 walk_expr(&item.context_expr, fname, out);
-                if let Some(optional_vars) = &item.optional_vars {
-                    walk_expr(optional_vars, fname, out);
-                }
             }
             for s in &w.body {
                 walk_stmt(s, fname, out);
@@ -561,9 +773,6 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::Match(m) => {
             walk_expr(&m.subject, fname, out);
             for case in &m.cases {
-                if let Some(guard) = &case.guard {
-                    walk_expr(guard, fname, out);
-                }
                 for s in &case.body {
                     walk_stmt(s, fname, out);
                 }
@@ -572,28 +781,22 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::Raise(r) => {
             out.push(GapReason::new(
                 Category::Exception,
-                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+                format!("raise inside `{fname}`"),
             ));
-            if let Some(exc) = &r.exc {
-                walk_expr(exc, fname, out);
-            }
-            if let Some(cause) = &r.cause {
-                walk_expr(cause, fname, out);
+            if let Some(e) = &r.exc {
+                walk_expr(e, fname, out);
             }
         }
         ast::Stmt::Try(t) => {
             out.push(GapReason::new(
                 Category::Exception,
-                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+                format!("try/except inside `{fname}`"),
             ));
             for s in &t.body {
                 walk_stmt(s, fname, out);
             }
-            for handler in &t.handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = handler;
-                if let Some(type_) = &h.type_ {
-                    walk_expr(type_, fname, out);
-                }
+            for h in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = h;
                 for s in &h.body {
                     walk_stmt(s, fname, out);
                 }
@@ -608,16 +811,13 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         ast::Stmt::TryStar(t) => {
             out.push(GapReason::new(
                 Category::Exception,
-                format!("exception handling inside `{fname}` not lowered (README Exception)"),
+                format!("try/except* inside `{fname}`"),
             ));
             for s in &t.body {
                 walk_stmt(s, fname, out);
             }
-            for handler in &t.handlers {
-                let ast::ExceptHandler::ExceptHandler(h) = handler;
-                if let Some(type_) = &h.type_ {
-                    walk_expr(type_, fname, out);
-                }
+            for h in &t.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = h;
                 for s in &h.body {
                     walk_stmt(s, fname, out);
                 }
@@ -631,31 +831,23 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
         }
         ast::Stmt::Assert(a) => {
             walk_expr(&a.test, fname, out);
-            if let Some(msg) = &a.msg {
-                walk_expr(msg, fname, out);
+            if let Some(m) = &a.msg {
+                walk_expr(m, fname, out);
             }
         }
         ast::Stmt::Import(i) => {
-            let names: Vec<_> = i.names.iter().map(|a| a.name.to_string()).collect();
-            out.push(GapReason::new(
-                Category::Import,
-                format!(
-                    "nested import {} inside `{fname}` not lowered — unresolved / unmapped import (flag not guess)",
-                    names.join(", ")
-                ),
-            ));
+            for a in &i.names {
+                out.push(GapReason::new(
+                    Category::Import,
+                    format!("import `{}` inside `{fname}`", a.name),
+                ));
+            }
         }
         ast::Stmt::ImportFrom(i) => {
-            let mod_name = i
-                .module
-                .as_ref()
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| ".".into());
+            let mod_name = i.module.as_deref().unwrap_or("");
             out.push(GapReason::new(
                 Category::Import,
-                format!(
-                    "nested from {mod_name} import … inside `{fname}` not lowered — unresolved / unmapped import"
-                ),
+                format!("from {mod_name} import … inside `{fname}`"),
             ));
         }
         ast::Stmt::Global(_)
@@ -667,6 +859,7 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&e.value, fname, out);
         }
         ast::Stmt::TypeAlias(t) => {
+            walk_expr(&t.name, fname, out);
             walk_expr(&t.value, fname, out);
         }
     }
@@ -676,27 +869,25 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
     if let ast::Expr::Lambda(l) = expr {
         out.push(GapReason::new(
             Category::Lambda,
-            format!("lambda inside `{fname}` not lowered"),
+            format!("lambda inside `{fname}`"),
         ));
         walk_expr(&l.body, fname, out);
         return;
     }
-
     if let ast::Expr::Call(c) = expr {
         if let ast::Expr::Name(n) = c.func.as_ref() {
-            if n.id.as_str() == "exec" || n.id.as_str() == "eval" {
+            if matches!(n.id.as_str(), "exec" | "eval") {
                 out.push(GapReason::new(
                     Category::Metaprogramming,
-                    format!("exec/eval inside `{fname}` not lowered (README Metaprogramming)"),
+                    format!("`{}` call inside `{fname}`", n.id),
                 ));
             }
         }
     }
-
     match expr {
         ast::Expr::BoolOp(b) => {
-            for val in &b.values {
-                walk_expr(val, fname, out);
+            for v in &b.values {
+                walk_expr(v, fname, out);
             }
         }
         ast::Expr::NamedExpr(n) => {
@@ -707,9 +898,7 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&b.left, fname, out);
             walk_expr(&b.right, fname, out);
         }
-        ast::Expr::UnaryOp(u) => {
-            walk_expr(&u.operand, fname, out);
-        }
+        ast::Expr::UnaryOp(u) => walk_expr(&u.operand, fname, out),
         ast::Expr::Lambda(_) => unreachable!(),
         ast::Expr::IfExp(i) => {
             walk_expr(&i.test, fname, out);
@@ -720,122 +909,108 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             for k in d.keys.iter().flatten() {
                 walk_expr(k, fname, out);
             }
-            for val in &d.values {
-                walk_expr(val, fname, out);
+            for v in &d.values {
+                walk_expr(v, fname, out);
             }
         }
         ast::Expr::Set(s) => {
-            for elt in &s.elts {
-                walk_expr(elt, fname, out);
+            for e in &s.elts {
+                walk_expr(e, fname, out);
             }
         }
         ast::Expr::ListComp(lc) => {
+            out.push(comp_gap(fname, "list"));
             walk_expr(&lc.elt, fname, out);
-            for gen in &lc.generators {
-                walk_comprehension(gen, fname, out);
-            }
         }
         ast::Expr::SetComp(sc) => {
+            out.push(comp_gap(fname, "set"));
             walk_expr(&sc.elt, fname, out);
-            for gen in &sc.generators {
-                walk_comprehension(gen, fname, out);
-            }
         }
         ast::Expr::DictComp(dc) => {
+            out.push(comp_gap(fname, "dict"));
             walk_expr(&dc.key, fname, out);
             walk_expr(&dc.value, fname, out);
-            for gen in &dc.generators {
-                walk_comprehension(gen, fname, out);
-            }
         }
         ast::Expr::GeneratorExp(ge) => {
+            out.push(comp_gap(fname, "generator"));
             walk_expr(&ge.elt, fname, out);
-            for gen in &ge.generators {
-                walk_comprehension(gen, fname, out);
-            }
         }
         ast::Expr::Await(a) => {
+            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {
-            if let Some(val) = &y.value {
-                walk_expr(val, fname, out);
+            if let Some(v) = &y.value {
+                walk_expr(v, fname, out);
             }
         }
-        ast::Expr::YieldFrom(y) => {
-            walk_expr(&y.value, fname, out);
-        }
+        ast::Expr::YieldFrom(y) => walk_expr(&y.value, fname, out),
         ast::Expr::Compare(c) => {
             walk_expr(&c.left, fname, out);
-            for comparator in &c.comparators {
-                walk_expr(comparator, fname, out);
+            for r in &c.comparators {
+                walk_expr(r, fname, out);
             }
         }
         ast::Expr::Call(c) => {
             walk_expr(&c.func, fname, out);
-            for arg in &c.args {
-                walk_expr(arg, fname, out);
+            for a in &c.args {
+                walk_expr(a, fname, out);
             }
-            for kw in &c.keywords {
-                walk_expr(&kw.value, fname, out);
+            for k in &c.keywords {
+                walk_expr(&k.value, fname, out);
             }
         }
         ast::Expr::FormattedValue(f) => {
             walk_expr(&f.value, fname, out);
-            if let Some(spec) = &f.format_spec {
-                walk_expr(spec, fname, out);
+            if let Some(fmt) = &f.format_spec {
+                walk_expr(fmt, fname, out);
             }
         }
         ast::Expr::JoinedStr(j) => {
-            for val in &j.values {
-                walk_expr(val, fname, out);
+            for v in &j.values {
+                walk_expr(v, fname, out);
             }
         }
         ast::Expr::Constant(_) => {}
-        ast::Expr::Attribute(a) => {
-            walk_expr(&a.value, fname, out);
-        }
+        ast::Expr::Attribute(a) => walk_expr(&a.value, fname, out),
         ast::Expr::Subscript(s) => {
             walk_expr(&s.value, fname, out);
             walk_expr(&s.slice, fname, out);
         }
-        ast::Expr::Starred(s) => {
-            walk_expr(&s.value, fname, out);
-        }
+        ast::Expr::Starred(s) => walk_expr(&s.value, fname, out),
         ast::Expr::Name(_) => {}
         ast::Expr::List(l) => {
-            for elt in &l.elts {
-                walk_expr(elt, fname, out);
+            for e in &l.elts {
+                walk_expr(e, fname, out);
             }
         }
         ast::Expr::Tuple(t) => {
-            for elt in &t.elts {
-                walk_expr(elt, fname, out);
+            for e in &t.elts {
+                walk_expr(e, fname, out);
             }
         }
         ast::Expr::Slice(s) => {
-            if let Some(lower) = &s.lower {
-                walk_expr(lower, fname, out);
+            if let Some(l) = &s.lower {
+                walk_expr(l, fname, out);
             }
-            if let Some(upper) = &s.upper {
-                walk_expr(upper, fname, out);
+            if let Some(u) = &s.upper {
+                walk_expr(u, fname, out);
             }
-            if let Some(step) = &s.step {
-                walk_expr(step, fname, out);
+            if let Some(st) = &s.step {
+                walk_expr(st, fname, out);
             }
         }
     }
 }
 
-fn walk_comprehension(gen: &ast::Comprehension, fname: &str, out: &mut Vec<GapReason>) {
-    walk_expr(&gen.target, fname, out);
-    walk_expr(&gen.iter, fname, out);
-    for cond in &gen.ifs {
-        walk_expr(cond, fname, out);
-    }
+fn comp_gap(fname: &str, kind: &str) -> GapReason {
+    GapReason::new(
+        Category::Comprehension,
+        format!("{kind} comprehension inside `{fname}`"),
+    )
 }
 
-/// Placeholder for class emission — always a hard gap at dispatch layer.
+/// Emit a class as a hard Class gap (dispatch handles structure).
 pub fn class_gap_reason(class: &ast::StmtClassDef) -> GapReason {
     let bases = if class.bases.is_empty() {
         "no bases".to_string()

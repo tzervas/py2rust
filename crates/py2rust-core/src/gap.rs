@@ -279,8 +279,14 @@ impl GapReport {
     /// One per emitted top-level item: a `def` whose signature lowered but whose
     /// body did not contributes exactly **one** statement, not its whole body.
     /// That is the entire difference between L1 and L2.
+    ///
+    /// Synthetic `#erase:…` witnesses (erasable imports) are excluded — they
+    /// exist only so never-silent holds when a top-level import leaves no Rust.
     pub fn lowered_statement_count(&self) -> usize {
-        self.emitted_items.len()
+        self.emitted_items
+            .iter()
+            .filter(|n| !n.starts_with("#erase:"))
+            .count()
     }
 
     /// **L2** — lowered statements over *all* statements. `None` when the
@@ -300,10 +306,17 @@ impl GapReport {
             .count()
     }
 
-    /// Translatable-surface denominator: total top-level minus excluded categories.
+    /// Translatable-surface denominator: total top-level minus excluded categories
+    /// and synthetic erase witnesses (erasable imports).
     pub fn non_excluded_item_count(&self) -> usize {
+        let erased = self
+            .emitted_items
+            .iter()
+            .filter(|n| n.starts_with("#erase:"))
+            .count();
         self.total_top_level_items
             .saturating_sub(self.denominator_excluded_count())
+            .saturating_sub(erased)
     }
 
     /// Fraction of non-excluded top-level items for which some Rust text was emitted.
@@ -313,7 +326,7 @@ impl GapReport {
         if denom == 0 {
             return 0.0;
         }
-        self.emitted_items.len() as f64 / denom as f64
+        self.lowered_statement_count() as f64 / denom as f64
     }
 
     pub fn category_counts(&self) -> BTreeMap<&'static str, usize> {
