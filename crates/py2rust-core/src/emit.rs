@@ -320,6 +320,11 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
+                // Same mut-honesty gate as Assign: annotated rebind of a pre-loop
+                // name would lower to a shadowing `let` and return the wrong outer value.
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                    return None;
+                }
                 let ann_ty = map_type_expr(a.annotation.as_ref())?;
                 let value = a.value.as_deref()?;
                 let rhs = lower_simple_expr_in(value, &local_env, Some(&ann_ty))?;

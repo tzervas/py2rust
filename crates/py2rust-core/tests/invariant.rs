@@ -451,6 +451,31 @@ def sum_range(n: int) -> int:
 }
 
 #[test]
+fn for_loop_annassign_outer_rebind_declines() {
+    // Same honesty gate as bare Assign: annotated rebind must not emit nested lets.
+    let src = r#"
+def sum_range(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        total: int = total + i
+    return total
+"#;
+    let (report, rust) = transpile_source(src, "for_ann_rebind.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "AnnAssign outer rebind must FunctionBody-gap: gaps={:?}\nrust:\n{rust}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("todo!") || rust.contains("GAP: FunctionBody"),
+        "expected honest stub, got:\n{rust}"
+    );
+}
+
+#[test]
 fn collections_abc_and_pathlib_imports_erase() {
     let src = r#"
 from collections.abc import Mapping, Sequence
