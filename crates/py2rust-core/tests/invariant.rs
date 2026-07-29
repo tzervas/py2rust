@@ -384,3 +384,115 @@ def double_list(xs: list[int]) -> list[int]:
         report.gaps
     );
 }
+
+#[test]
+fn for_range_and_break_continue_lower() {
+    // Pure for/range/break/continue without rebinding outer names — honest lower.
+    let src = r#"
+def first_positive(n: int) -> int:
+    for i in range(n):
+        if i == 0:
+            continue
+        if i > 100:
+            break
+        return i
+    return 0
+
+def sum_slice_ids(a: int, b: int) -> int:
+    # no accumulator: just returns upper bound after iterating
+    for i in range(a, b):
+        if i < 0:
+            continue
+    return b
+"#;
+    let (report, rust) = transpile_source(src, "for_range.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody
+                && g.item_name.as_deref() == Some("first_positive")),
+        "for/range/break/continue without outer rebind should lower: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
+        "expected for/range/break/continue:\n{rust}"
+    );
+    assert!(
+        rust.contains("for i in a..b"),
+        "range(a,b) → a..b:\n{rust}"
+    );
+}
+
+#[test]
+fn for_loop_outer_rebind_declines() {
+    // Accumulator pattern needs mut; emitting `let` shadows would be L3-green wrong.
+    let src = r#"
+def sum_range(n: int) -> int:
+    total = 0
+    for i in range(n):
+        total = total + i
+    return total
+"#;
+    let (report, rust) = transpile_source(src, "for_rebind.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "outer rebind in for must FunctionBody-gap, not silent wrong let: gaps={:?}\nrust:\n{rust}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("todo!") || rust.contains("GAP: FunctionBody"),
+        "expected honest stub, got:\n{rust}"
+    );
+}
+
+#[test]
+fn for_loop_annassign_outer_rebind_declines() {
+    // Same honesty gate as bare Assign: annotated rebind must not emit nested lets.
+    let src = r#"
+def sum_range(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        total: int = total + i
+    return total
+"#;
+    let (report, rust) = transpile_source(src, "for_ann_rebind.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "AnnAssign outer rebind must FunctionBody-gap: gaps={:?}\nrust:\n{rust}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("todo!") || rust.contains("GAP: FunctionBody"),
+        "expected honest stub, got:\n{rust}"
+    );
+}
+
+#[test]
+fn collections_abc_and_pathlib_imports_erase() {
+    let src = r#"
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+def id_path(p: Path) -> Path:
+    return p
+"#;
+    let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
+    assert!(
+        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        "type-only imports should erase: {:?}",
+        report.emitted_items
+    );
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::Import),
+        "collections.abc / pathlib must not Import-gap: {:?}",
+        report.gaps
+    );
+}
