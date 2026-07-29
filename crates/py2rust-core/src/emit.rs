@@ -157,7 +157,7 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         .filter(|(_, t)| is_known_type(t))
         .collect();
     let ret_known = is_known_type(&ret_ty).then(|| ret_ty.clone());
-    let body_lowered = try_lower_body(&func.body, ret_is_unit, &env, ret_known.as_deref());
+    let body_lowered = try_lower_body(&func.body, ret_is_unit, &env, ret_known.as_deref(), None);
     let body_text = match body_lowered {
         Some(b) => b,
         None => {
@@ -234,6 +234,10 @@ fn try_lower_body(
     ret_is_unit: bool,
     env: &TypeEnv,
     ret_ty: Option<&str>,
+    // Names bound before entering a loop. Reassignment of these inside the
+    // loop would need `mut` (we only emit `let` shadows, which are wrong across
+    // iterations). Decline rather than emit L3-green incorrect code.
+    rebind_forbidden: Option<&TypeEnv>,
 ) -> Option<String> {
     if body.is_empty() {
         return Some(String::new());
@@ -294,13 +298,17 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
+                // Loop rebind of an outer name → would need mut; decline (honesty).
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                    return None;
+                }
                 // Prefer type forced by RHS; fall back to existing env entry.
                 let want = forced_ty(&a.value, &local_env)
                     .or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
-                if let Some(t) = want {
-                    local_env.insert(name, t);
-                }
+                // Always record the binding so loop rebind detection sees untyped
+                // literals (`total = 0`) as well as annotated names.
+                local_env.insert(name, want.unwrap_or_else(|| "_".into()));
                 lines.push(format!("    let {rs_name} = {rhs};"));
             }
             ast::Stmt::AnnAssign(a) => {
@@ -327,6 +335,9 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
+                if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                    return None;
+                }
                 let want = local_env.get(&name).cloned();
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // No mut tracking yet: rewrite `x += rhs` as shadow `let x = (x + rhs)`,
@@ -347,15 +358,15 @@ fn try_lower_body(
                 lines.push(format!("    let {rs_name} = ({rs_name} {bin} {rhs});"));
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit)?;
+                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
-                let block = lower_while(w, &local_env, ret_ty)?;
+                let block = lower_while(w, &local_env, ret_ty, rebind_forbidden)?;
                 lines.push(block);
             }
             ast::Stmt::For(f) => {
-                let block = lower_for(f, &local_env, ret_ty)?;
+                let block = lower_for(f, &local_env, ret_ty, rebind_forbidden)?;
                 lines.push(block);
             }
             ast::Stmt::Break(_) => {
@@ -388,9 +399,10 @@ fn lower_if(
     ret_ty: Option<&str>,
     is_tail: bool,
     ret_is_unit: bool,
+    rebind_forbidden: Option<&TypeEnv>,
 ) -> Option<String> {
     let test = lower_simple_expr_in(&i.test, env, Some("bool"))?;
-    let body = try_lower_body(&i.body, ret_is_unit, env, ret_ty)?;
+    let body = try_lower_body(&i.body, ret_is_unit, env, ret_ty, rebind_forbidden)?;
     let body_inner = indent_block(&body);
     if i.orelse.is_empty() {
         // Bare if without else cannot be a value-producing tail unless unit.
@@ -402,16 +414,17 @@ fn lower_if(
     // `elif` chains arrive as a single Stmt::If in orelse.
     let else_inner = if i.orelse.len() == 1 {
         if let ast::Stmt::If(nested) = &i.orelse[0] {
-            let nested_block = lower_if(nested, env, ret_ty, is_tail, ret_is_unit)?;
+            let nested_block =
+                lower_if(nested, env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
             // nested_block already has leading indent; strip one level for else arm.
             return Some(format!(
                 "    if {test} {{\n{body_inner}    }} else {{\n{}\n    }}",
                 strip_outer_indent(&nested_block)
             ));
         }
-        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty)?
+        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty, rebind_forbidden)?
     } else {
-        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty)?
+        try_lower_body(&i.orelse, ret_is_unit, env, ret_ty, rebind_forbidden)?
     };
     let else_inner = indent_block(&else_inner);
     Some(format!(
@@ -419,14 +432,21 @@ fn lower_if(
     ))
 }
 
-fn lower_while(w: &ast::StmtWhile, env: &TypeEnv, ret_ty: Option<&str>) -> Option<String> {
+fn lower_while(
+    w: &ast::StmtWhile,
+    env: &TypeEnv,
+    ret_ty: Option<&str>,
+    outer_rebind: Option<&TypeEnv>,
+) -> Option<String> {
     if !w.orelse.is_empty() {
         // while/else is Python-specific; decline rather than drop the else.
         return None;
     }
     let test = lower_simple_expr_in(&w.test, env, Some("bool"))?;
-    // Loop body is unit-ish from the outer function's POV — returns inside become `return`.
-    let body = try_lower_body(&w.body, true, env, ret_ty)?;
+    // Forbid rebinding anything visible at loop entry (outer_rebind ∪ env).
+    // `env` alone is enough: it already contains outer names.
+    let _ = outer_rebind; // retained for call-site symmetry / future union
+    let body = try_lower_body(&w.body, true, env, ret_ty, Some(env))?;
     let body_inner = indent_block(&body);
     Some(format!("    while {test} {{\n{body_inner}    }}"))
 }
@@ -437,7 +457,13 @@ fn lower_while(w: &ast::StmtWhile, env: &TypeEnv, ret_ty: Option<&str>) -> Optio
 /// - bare name / simple expr that already lowers → `for x in <expr>`
 ///
 /// for/else declined (Python-only). Unpacking targets declined.
-fn lower_for(f: &ast::StmtFor, env: &TypeEnv, ret_ty: Option<&str>) -> Option<String> {
+/// Rebinding names bound before the loop is declined (needs `mut`).
+fn lower_for(
+    f: &ast::StmtFor,
+    env: &TypeEnv,
+    ret_ty: Option<&str>,
+    outer_rebind: Option<&TypeEnv>,
+) -> Option<String> {
     if !f.orelse.is_empty() {
         return None;
     }
@@ -450,7 +476,9 @@ fn lower_for(f: &ast::StmtFor, env: &TypeEnv, ret_ty: Option<&str>) -> Option<St
         return None;
     }
     let iter = lower_for_iter(f.iter.as_ref(), env)?;
-    let body = try_lower_body(&f.body, true, env, ret_ty)?;
+    let _ = outer_rebind;
+    // Env at loop entry: reassignment of these names needs mut — decline.
+    let body = try_lower_body(&f.body, true, env, ret_ty, Some(env))?;
     let body_inner = indent_block(&body);
     Some(format!(
         "    for {rs_target} in {iter} {{\n{body_inner}    }}"
