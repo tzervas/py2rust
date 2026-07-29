@@ -243,7 +243,15 @@ fn mixed_covers_readme_categories() {
         cats.contains_key("Metaprogramming"),
         "Metaprogramming: {cats:?}"
     );
-    assert!(cats.contains_key("Import"), "Import: {cats:?}");
+    assert!(
+        cats.contains_key("Import")
+            || report
+                .emitted_items
+                .iter()
+                .any(|n| n.starts_with("#import:")),
+        "Import gap or stdlib import-map emit required: cats={cats:?} emitted={:?}",
+        report.emitted_items
+    );
     assert!(cats.contains_key("Lambda"), "Lambda: {cats:?}");
     // Typed function still emitted
     assert!(report.emitted_items.iter().any(|n| n == "typed_add"));
@@ -381,6 +389,179 @@ def double_list(xs: list[int]) -> list[int]:
                 g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
             }),
         "clamp should lower: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn for_range_and_break_continue_lower() {
+    // Pure for/range/break/continue without rebinding outer names — honest lower.
+    let src = r#"
+def first_positive(n: int) -> int:
+    for i in range(n):
+        if i == 0:
+            continue
+        if i > 100:
+            break
+        return i
+    return 0
+
+def sum_slice_ids(a: int, b: int) -> int:
+    # no accumulator: just returns upper bound after iterating
+    for i in range(a, b):
+        if i < 0:
+            continue
+    return b
+"#;
+    let (report, rust) = transpile_source(src, "for_range.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody
+                && g.item_name.as_deref() == Some("first_positive")),
+        "for/range/break/continue without outer rebind should lower: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
+        "expected for/range/break/continue:\n{rust}"
+    );
+    assert!(
+        rust.contains("for i in a..b"),
+        "range(a,b) → a..b:\n{rust}"
+    );
+}
+
+#[test]
+fn for_loop_outer_rebind_uses_mut() {
+    // Accumulator pattern: `let mut total` + assignment inside the loop (not shadow let).
+    let src = r#"
+def sum_range(n: int) -> int:
+    total = 0
+    for i in range(n):
+        total = total + i
+    return total
+"#;
+    let (report, rust) = transpile_source(src, "for_rebind.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "sum_range with loop accumulator must lower fully: gaps={:?}\nrust:\n{rust}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("let mut total"),
+        "expected let mut total for accumulator:\n{rust}"
+    );
+    assert!(
+        rust.contains("total = (total + i)") || rust.contains("total = total + i"),
+        "expected bare assignment inside loop (no re-let):\n{rust}"
+    );
+    // Must not re-let the accumulator inside the loop body.
+    let after_for = rust.split("for i in").nth(1).unwrap_or("");
+    assert!(
+        !after_for.contains("let total") && !after_for.contains("let mut total"),
+        "loop body must not re-let total:\n{rust}"
+    );
+    assert!(
+        !rust.contains("todo!") && !rust.contains("GAP: FunctionBody"),
+        "expected full lower, got stub:\n{rust}"
+    );
+}
+
+#[test]
+fn for_loop_annassign_outer_rebind_uses_mut() {
+    // Annotated accumulator: same mut + assignment shape as bare Assign.
+    let src = r#"
+def sum_range(n: int) -> int:
+    total: int = 0
+    for i in range(n):
+        total: int = total + i
+    return total
+"#;
+    let (report, rust) = transpile_source(src, "for_ann_rebind.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "AnnAssign accumulator must lower fully: gaps={:?}\nrust:\n{rust}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("let mut total"),
+        "expected let mut total for annotated accumulator:\n{rust}"
+    );
+    assert!(
+        rust.contains("total = (total + i)") || rust.contains("total = total + i"),
+        "expected bare assignment inside loop:\n{rust}"
+    );
+    let after_for = rust.split("for i in").nth(1).unwrap_or("");
+    assert!(
+        !after_for.contains("let total") && !after_for.contains("let mut total"),
+        "loop body must not re-let total:\n{rust}"
+    );
+}
+
+#[test]
+fn collections_abc_and_pathlib_imports_erase() {
+    let src = r#"
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+def id_path(p: Path) -> Path:
+    return p
+"#;
+    let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
+    assert!(
+        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        "type-only imports should erase: {:?}",
+        report.emitted_items
+    );
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::Import),
+        "collections.abc / pathlib must not Import-gap: {:?}",
+        report.gaps
+    );
+}
+
+/// Issue #51: module-level literal assignments lower to Rust `const` items.
+#[test]
+fn module_level_literal_assign_emits_const() {
+    let src = r#"
+x = 1
+s = "hi"
+b = True
+f = 1.5
+COUNT: int = 42
+NAME: str = "ok"
+x_dyn = unknown()
+"#;
+    let (report, rust) = transpile_source(src, "mod_lit.py", Some("mod_lit")).unwrap();
+    assert!(report.never_silent_holds());
+    for name in ["x", "s", "b", "f", "COUNT", "NAME"] {
+        assert!(
+            report.emitted_items.iter().any(|n| n == name),
+            "expected const emit for {name}: {:?}",
+            report.emitted_items
+        );
+    }
+    assert!(rust.contains("const x: i64 = 1;"), "rust:\n{rust}");
+    assert!(rust.contains("const s: &str = \"hi\";"), "rust:\n{rust}");
+    assert!(rust.contains("const b: bool = true;"), "rust:\n{rust}");
+    assert!(rust.contains("const COUNT: i64 = 42;"), "rust:\n{rust}");
+    assert!(rust.contains("const NAME: &str = \"ok\";"), "rust:\n{rust}");
+    // Non-literal stays honest DynamicTyping gap.
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::DynamicTyping
+                && g.item_name.as_deref() == Some("x_dyn")),
+        "non-literal must DynamicTyping-gap: {:?}",
         report.gaps
     );
 }
