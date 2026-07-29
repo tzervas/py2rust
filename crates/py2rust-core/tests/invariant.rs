@@ -565,3 +565,82 @@ x_dyn = unknown()
         report.gaps
     );
 }
+
+#[test]
+fn simple_call_and_attr_lower() {
+    // Use mapped types only — DynamicTyping is out of scope for #50.
+    let src = r#"
+def get_x(p: list[int]) -> int:
+    return p.x
+
+def call_f(x: int) -> int:
+    return f(x)
+
+def method_call(p: list[int], n: int) -> int:
+    return p.get(n)
+"#;
+    let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
+    assert!(
+        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "simple call/attr must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    for name in ["get_x", "call_f", "method_call"] {
+        assert!(
+            report.emitted_items.iter().any(|n| n == name),
+            "expected {name}: {:?}",
+            report.emitted_items
+        );
+    }
+    assert!(rust.contains("p.x"), "attr: {rust}");
+    assert!(rust.contains("f(x)"), "call: {rust}");
+    assert!(rust.contains("p.get(n)"), "method: {rust}");
+}
+
+#[test]
+fn call_with_kwargs_declines() {
+    let src = r#"
+def g(x: int) -> int:
+    return f(x, y=1)
+"#;
+    let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "kwargs call must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn starargs_call_declines() {
+    let src = r#"
+def g(xs: list[int]) -> int:
+    return f(*xs)
+"#;
+    let (report, _) = transpile_source(src, "star.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "starargs must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn free_range_call_declines() {
+    let src = r#"
+def g(n: int) -> int:
+    return range(n)
+"#;
+    let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
+    assert!(
+        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        "free range must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    // Body should be todo, not a free `range(` call claiming validity.
+    assert!(
+        rust.contains("todo!"),
+        "expected FunctionBody stub, got:\n{rust}"
+    );
+}
+
