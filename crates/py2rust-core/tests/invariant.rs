@@ -426,8 +426,8 @@ def sum_slice_ids(a: int, b: int) -> int:
 }
 
 #[test]
-fn for_loop_outer_rebind_declines() {
-    // Accumulator pattern needs mut; emitting `let` shadows would be L3-green wrong.
+fn for_loop_outer_rebind_uses_mut() {
+    // Accumulator pattern: `let mut total` + assignment inside the loop (not shadow let).
     let src = r#"
 def sum_range(n: int) -> int:
     total = 0
@@ -437,22 +437,36 @@ def sum_range(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "for_rebind.py", None).unwrap();
     assert!(
-        report
+        !report
             .gaps
             .iter()
             .any(|g| g.category == Category::FunctionBody),
-        "outer rebind in for must FunctionBody-gap, not silent wrong let: gaps={:?}\nrust:\n{rust}",
+        "sum_range with loop accumulator must lower fully: gaps={:?}\nrust:\n{rust}",
         report.gaps
     );
     assert!(
-        rust.contains("todo!") || rust.contains("GAP: FunctionBody"),
-        "expected honest stub, got:\n{rust}"
+        rust.contains("let mut total"),
+        "expected let mut total for accumulator:\n{rust}"
+    );
+    assert!(
+        rust.contains("total = (total + i)") || rust.contains("total = total + i"),
+        "expected bare assignment inside loop (no re-let):\n{rust}"
+    );
+    // Must not re-let the accumulator inside the loop body.
+    let after_for = rust.split("for i in").nth(1).unwrap_or("");
+    assert!(
+        !after_for.contains("let total") && !after_for.contains("let mut total"),
+        "loop body must not re-let total:\n{rust}"
+    );
+    assert!(
+        !rust.contains("todo!") && !rust.contains("GAP: FunctionBody"),
+        "expected full lower, got stub:\n{rust}"
     );
 }
 
 #[test]
-fn for_loop_annassign_outer_rebind_declines() {
-    // Same honesty gate as bare Assign: annotated rebind must not emit nested lets.
+fn for_loop_annassign_outer_rebind_uses_mut() {
+    // Annotated accumulator: same mut + assignment shape as bare Assign.
     let src = r#"
 def sum_range(n: int) -> int:
     total: int = 0
@@ -462,16 +476,25 @@ def sum_range(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "for_ann_rebind.py", None).unwrap();
     assert!(
-        report
+        !report
             .gaps
             .iter()
             .any(|g| g.category == Category::FunctionBody),
-        "AnnAssign outer rebind must FunctionBody-gap: gaps={:?}\nrust:\n{rust}",
+        "AnnAssign accumulator must lower fully: gaps={:?}\nrust:\n{rust}",
         report.gaps
     );
     assert!(
-        rust.contains("todo!") || rust.contains("GAP: FunctionBody"),
-        "expected honest stub, got:\n{rust}"
+        rust.contains("let mut total"),
+        "expected let mut total for annotated accumulator:\n{rust}"
+    );
+    assert!(
+        rust.contains("total = (total + i)") || rust.contains("total = total + i"),
+        "expected bare assignment inside loop:\n{rust}"
+    );
+    let after_for = rust.split("for i in").nth(1).unwrap_or("");
+    assert!(
+        !after_for.contains("let total") && !after_for.contains("let mut total"),
+        "loop body must not re-let total:\n{rust}"
     );
 }
 
