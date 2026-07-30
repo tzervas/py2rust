@@ -404,8 +404,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -483,7 +483,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -508,7 +515,10 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -645,11 +655,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -868,8 +874,60 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             Some(format!("{func}({})", args.join(", ")))
         }
         ast::Expr::ListComp(lc) => lower_list_comp(lc, env),
+        ast::Expr::Lambda(l) => lower_lambda(l, env),
         _ => None,
     }
+}
+
+/// Shape gate: lambdas we lower to Rust closures.
+///
+/// Python lambda params carry no annotations, so we never invent a type —
+/// Rust closure params stay unannotated and rustc infers them from use.
+/// Defaults and `*args`/`**kwargs` have no direct closure-param equivalent
+/// (defaults would need call-site rewriting; `*args`/`**kwargs` have no
+/// arity), so those decline rather than guess.
+fn is_simple_lambda_shape(l: &ast::ExprLambda) -> bool {
+    if l.args.vararg.is_some() || l.args.kwarg.is_some() {
+        return false;
+    }
+    l.args
+        .posonlyargs
+        .iter()
+        .chain(l.args.args.iter())
+        .chain(l.args.kwonlyargs.iter())
+        .all(|a| {
+            a.default.is_none() && !matches!(rust_ident(a.def.arg.as_str()).1, IdentFix::Renamed)
+        })
+}
+
+/// `lambda x, y: expr` → `|x, y| expr` and `lambda: expr` → `|| expr`.
+///
+/// Only single-expression bodies exist in Python's lambda grammar (it is not
+/// a statement), so this is a near-exact mechanical match to a Rust closure —
+/// as long as the body itself is one of the expression shapes already handled
+/// by [`lower_simple_expr_in`]. Anything else (defaults, `*args`/`**kwargs`,
+/// or a body this driver cannot otherwise lower) declines rather than guess.
+fn lower_lambda(l: &ast::ExprLambda, env: &TypeEnv) -> Option<String> {
+    if !is_simple_lambda_shape(l) {
+        return None;
+    }
+    let params: Vec<String> = l
+        .args
+        .posonlyargs
+        .iter()
+        .chain(l.args.args.iter())
+        .chain(l.args.kwonlyargs.iter())
+        .map(|a| rust_ident(a.def.arg.as_str()).0)
+        .collect();
+    // Params are untyped in Python lambdas; drop any same-named outer binding
+    // from scope so the body lowers against the closure's own parameter, not
+    // a stale forced type from an unrelated outer variable.
+    let mut local = env.clone();
+    for p in &params {
+        local.remove(p);
+    }
+    let body = lower_simple_expr_in(&l.body, &local, None)?;
+    Some(format!("|{}| {body}", params.join(", ")))
 }
 
 /// Shape gate shared by emit + walk: what Wave B #52 actually lowers.
@@ -1254,7 +1312,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {
