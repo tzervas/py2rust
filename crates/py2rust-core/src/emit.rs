@@ -152,6 +152,23 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
     // Nested honesty: scan body for exception / metaprogramming / lambda.
     scan_body_for_sub_gaps(&func.body, &name, &mut sub_gaps);
 
+    // Augmented assignment to a name never bound in this scope: Python raises
+    // UnboundLocalError at runtime, so honesty means naming this specifically
+    // rather than folding it into the generic "body not lowered" message.
+    {
+        let param_env: TypeEnv = arg_types.iter().cloned().collect();
+        for bad in find_undeclared_augassign(&func.body, &param_env) {
+            sub_gaps.push(GapReason::new(
+                Category::MultiStmtBody,
+                format!(
+                    "augmented assignment `{bad} += …` (or similar) inside `{name}` targets a \
+                     name never bound in this scope — Python raises UnboundLocalError at \
+                     runtime; not lowered (flag not guess)"
+                ),
+            ));
+        }
+    }
+
     // Only known types enter the environment. Placeholders (`/* dyn */ i32`)
     // stay out so inference declines instead of reasoning from a guess.
     let env: TypeEnv = arg_types
@@ -330,6 +347,63 @@ fn collect_assign_targets(body: &[ast::Stmt], out: &mut HashSet<String>) {
     }
 }
 
+/// Names targeted by `x += …` (etc.) that were never bound (by param, `Assign`,
+/// or `AnnAssign`) earlier in the same scope. Python raises `UnboundLocalError`
+/// for these at runtime; [`try_lower_body`] declines them but this walk exists
+/// to name the offending target explicitly rather than leave it inside a
+/// generic "body not lowered" gap. Branch arms are checked independently and
+/// do not merge back — conservative in the un-flagged direction (a name bound
+/// in only one `if` arm before a later top-level augassign is still flagged).
+fn find_undeclared_augassign(body: &[ast::Stmt], env: &TypeEnv) -> Vec<String> {
+    let mut bound: HashSet<String> = env.keys().cloned().collect();
+    let mut bad = Vec::new();
+    walk_augassign_bindings(body, &mut bound, &mut bad);
+    bad
+}
+
+fn walk_augassign_bindings(body: &[ast::Stmt], bound: &mut HashSet<String>, bad: &mut Vec<String>) {
+    for stmt in body {
+        match stmt {
+            ast::Stmt::Assign(a) => {
+                if let Some(ast::Expr::Name(n)) = a.targets.first() {
+                    bound.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::AnnAssign(a) => {
+                if let ast::Expr::Name(n) = a.target.as_ref() {
+                    bound.insert(n.id.to_string());
+                }
+            }
+            ast::Stmt::AugAssign(a) => {
+                if let ast::Expr::Name(n) = a.target.as_ref() {
+                    let target = n.id.to_string();
+                    if !bound.contains(&target) {
+                        bad.push(target.clone());
+                    }
+                    // Treat as bound from here on so later uses in the same
+                    // scope are not flagged again.
+                    bound.insert(target);
+                }
+            }
+            ast::Stmt::If(i) => {
+                let mut then_bound = bound.clone();
+                walk_augassign_bindings(&i.body, &mut then_bound, bad);
+                let mut else_bound = bound.clone();
+                walk_augassign_bindings(&i.orelse, &mut else_bound, bad);
+            }
+            ast::Stmt::For(f) => {
+                let mut loop_bound = bound.clone();
+                walk_augassign_bindings(&f.body, &mut loop_bound, bad);
+            }
+            ast::Stmt::While(w) => {
+                let mut loop_bound = bound.clone();
+                walk_augassign_bindings(&w.body, &mut loop_bound, bad);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Lower a function body. Multi-statement: assign / ann-assign / if / while /
 /// for / pass / return / break / continue. Anything else declines the whole body.
 fn try_lower_body(
@@ -404,8 +478,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -457,6 +531,13 @@ fn try_lower_body(
                 if matches!(fix, IdentFix::Renamed) {
                     return None;
                 }
+                // `x += 1` where `x` was never bound in this scope: Python raises
+                // UnboundLocalError at runtime. Emitting `let x = (x + 1)` would
+                // reference `x` before any Rust binding exists — decline instead
+                // of emitting text that merely looks like a valid rebind.
+                if !local_env.contains_key(&name) {
+                    return None;
+                }
                 let want = local_env.get(&name).cloned();
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 let bin = match a.op {
@@ -483,7 +564,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -500,6 +588,21 @@ fn try_lower_body(
             ast::Stmt::Continue(_) => {
                 lines.push("    continue;".into());
             }
+            ast::Stmt::Expr(e) => {
+                // Standalone expression statement, kept for its side effect.
+                // Only calls: bare literals/names have no effect (clippy::no_effect)
+                // and a docstring-as-statement is exactly that shape, so it still
+                // declines honestly rather than emitting a pointless literal.
+                // Bare-name calls to Python builtins with no same-named Rust
+                // function (print, len, …) are excluded too — emitting `print(a)`
+                // would look plausible but is not real Rust; decline instead of
+                // guessing at a mapping (flag not guess).
+                if !is_lowerable_stmt_expr(&e.value) {
+                    return None;
+                }
+                let lit = lower_simple_expr_in(&e.value, &local_env, None)?;
+                lines.push(format!("    {lit};"));
+            }
             _ => return None,
         }
     }
@@ -508,7 +611,10 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -645,11 +751,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -710,6 +812,71 @@ fn promote(l: Option<&str>, r: Option<&str>) -> Option<String> {
         // here would be exactly the silent inference this project refuses.
         _ => None,
     }
+}
+
+/// Whether a bare expression statement is safe to keep for its side effect.
+///
+/// Only calls qualify: a receiver-style call (`recv.method(...)`) or a call to
+/// a bare name that is not one of the Python builtins with no matching Rust
+/// free function. Everything else (bare literal/name/docstring, or a builtin
+/// like `print`/`len`) declines rather than emitting text that merely looks
+/// like valid Rust.
+fn is_lowerable_stmt_expr(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Call(c) => match c.func.as_ref() {
+            ast::Expr::Name(n) => !is_builtin_without_rust_equivalent(n.id.as_str()),
+            ast::Expr::Attribute(_) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Python builtins whose name is not also a real Rust free function. Calling
+/// one bare (`print(x)`, `len(xs)`) would emit text that compiles to nothing
+/// real, or nothing at all — declined rather than guessed at a mapping.
+fn is_builtin_without_rust_equivalent(name: &str) -> bool {
+    matches!(
+        name,
+        "print"
+            | "len"
+            | "str"
+            | "int"
+            | "float"
+            | "bool"
+            | "list"
+            | "dict"
+            | "set"
+            | "tuple"
+            | "input"
+            | "open"
+            | "sorted"
+            | "sum"
+            | "min"
+            | "max"
+            | "abs"
+            | "round"
+            | "isinstance"
+            | "type"
+            | "repr"
+            | "format"
+            | "enumerate"
+            | "zip"
+            | "map"
+            | "filter"
+            | "iter"
+            | "next"
+            | "super"
+            | "vars"
+            | "dir"
+            | "id"
+            | "hash"
+            | "help"
+            | "globals"
+            | "locals"
+            | "exec"
+            | "eval"
+    )
 }
 
 /// Lower an expression, adjusting *literals* to the expected type.
@@ -867,8 +1034,67 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             }
             Some(format!("{func}({})", args.join(", ")))
         }
+        ast::Expr::ListComp(lc) => lower_list_comp(lc, env),
         _ => None,
     }
+}
+
+/// Shape gate shared by emit + walk: what Wave B #52 actually lowers.
+fn is_simple_list_comp_shape(lc: &ast::ExprListComp) -> bool {
+    if lc.generators.len() != 1 {
+        return false;
+    }
+    let g = &lc.generators[0];
+    if g.is_async {
+        return false;
+    }
+    let ast::Expr::Name(n) = &g.target else {
+        return false;
+    };
+    !matches!(rust_ident(n.id.as_str()).1, IdentFix::Renamed)
+}
+
+/// Simple list comprehensions only: one generator, `Name` target, no async.
+///
+/// `[elt for x in xs]` → `xs.into_iter().map(|x| elt).collect::<Vec<_>>()`
+/// `[x for x in xs if p]` → filter then map/collect.
+/// Nested generators, unpack targets, and set/dict/genexps stay unlowered.
+fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
+    if !is_simple_list_comp_shape(lc) {
+        return None;
+    }
+    let g = &lc.generators[0];
+    let target = match &g.target {
+        ast::Expr::Name(n) => n.id.to_string(),
+        _ => return None,
+    };
+    let (rs_t, _) = rust_ident(&target);
+    let iter = lower_simple_expr_in(&g.iter, env, None)?;
+    // Bind the loop var so names inside elt/ifs lower (type unknown — rustc decides).
+    let mut local = env.clone();
+    local.insert(target.clone(), "/* dyn */".into());
+
+    let mut chain = format!("{iter}.into_iter()");
+    if !g.ifs.is_empty() {
+        let mut conds = Vec::new();
+        for pred in &g.ifs {
+            conds.push(lower_simple_expr_in(pred, &local, Some("bool"))?);
+        }
+        let cond = if conds.len() == 1 {
+            conds[0].clone()
+        } else {
+            format!("({})", conds.join(" && "))
+        };
+        chain.push_str(&format!(".filter(|{rs_t}| {cond})"));
+    }
+    // Identity `[x for x in xs]` skips map.
+    let is_identity = matches!(lc.elt.as_ref(), ast::Expr::Name(n) if n.id.as_str() == target);
+    if !is_identity {
+        let elt = lower_simple_expr_in(lc.elt.as_ref(), &local, None)?;
+        chain.push_str(&format!(".map(|{rs_t}| {elt})"));
+    }
+    chain.push_str(".collect::<Vec<_>>()");
+    Some(chain)
 }
 
 /// Render a Python constant as Rust, honouring an expected type for numerics.
@@ -939,6 +1165,13 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Stmt::Delete(d) => {
+            out.push(GapReason::new(
+                Category::MultiStmtBody,
+                format!(
+                    "del statement inside `{fname}` not lowered — Rust bindings cannot be \
+                     un-bound (flag not guess)"
+                ),
+            ));
             for t in &d.targets {
                 walk_expr(t, fname, out);
             }
@@ -1099,11 +1332,35 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
                 format!("from {mod_name} import … inside `{fname}`"),
             ));
         }
-        ast::Stmt::Global(_)
-        | ast::Stmt::Nonlocal(_)
-        | ast::Stmt::Pass(_)
-        | ast::Stmt::Break(_)
-        | ast::Stmt::Continue(_) => {}
+        ast::Stmt::Global(g) => {
+            out.push(GapReason::new(
+                Category::MultiStmtBody,
+                format!(
+                    "global {} inside `{fname}` — Rust has no equivalent for rebinding a \
+                     module-level name from function scope (flag not guess)",
+                    g.names
+                        .iter()
+                        .map(|n| n.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        ast::Stmt::Nonlocal(n) => {
+            out.push(GapReason::new(
+                Category::MultiStmtBody,
+                format!(
+                    "nonlocal {} inside `{fname}` — Rust has no equivalent for rebinding an \
+                     enclosing scope's name (flag not guess)",
+                    n.names
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        ast::Stmt::Pass(_) | ast::Stmt::Break(_) | ast::Stmt::Continue(_) => {}
         ast::Stmt::Expr(e) => {
             walk_expr(&e.value, fname, out);
         }
@@ -1168,8 +1425,18 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Expr::ListComp(lc) => {
-            out.push(comp_gap(fname, "list"));
+            // Only gap shapes we do *not* lower in `lower_list_comp`. Simple
+            // one-gen Name-target comps are real emission, not Comprehension debt.
+            if !is_simple_list_comp_shape(lc) {
+                out.push(comp_gap(fname, "list"));
+            }
             walk_expr(&lc.elt, fname, out);
+            for g in &lc.generators {
+                walk_expr(&g.iter, fname, out);
+                for pred in &g.ifs {
+                    walk_expr(pred, fname, out);
+                }
+            }
         }
         ast::Expr::SetComp(sc) => {
             out.push(comp_gap(fname, "set"));
@@ -1185,7 +1452,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {

@@ -364,7 +364,10 @@ def double_list(xs: list[int]) -> list[int]:
 "#;
     let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "typing imports should erase: {:?}",
         report.emitted_items
     );
@@ -382,12 +385,9 @@ def double_list(xs: list[int]) -> list[int]:
         "list[int] should map:\n{rust}"
     );
     assert!(
-        !report
-            .gaps
-            .iter()
-            .any(|g| {
-                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
-            }),
+        !report.gaps.iter().any(|g| {
+            g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+        }),
         "clamp should lower: {:?}",
         report.gaps
     );
@@ -427,10 +427,7 @@ def sum_slice_ids(a: int, b: int) -> int:
         rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
         "expected for/range/break/continue:\n{rust}"
     );
-    assert!(
-        rust.contains("for i in a..b"),
-        "range(a,b) → a..b:\n{rust}"
-    );
+    assert!(rust.contains("for i in a..b"), "range(a,b) → a..b:\n{rust}");
 }
 
 #[test]
@@ -517,7 +514,10 @@ def id_path(p: Path) -> Path:
 "#;
     let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "type-only imports should erase: {:?}",
         report.emitted_items
     );
@@ -581,7 +581,10 @@ def method_call(p: list[int], n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "simple call/attr must not FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -605,7 +608,10 @@ def g(x: int) -> int:
 "#;
     let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "kwargs call must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -619,7 +625,10 @@ def g(xs: list[int]) -> int:
 "#;
     let (report, _) = transpile_source(src, "star.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "starargs must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -633,7 +642,10 @@ def g(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "free range must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -644,3 +656,187 @@ def g(n: int) -> int:
     );
 }
 
+#[test]
+fn simple_list_comprehension_lowers() {
+    let src = r#"
+def map_double(xs: list[int]) -> list[int]:
+    return [x * 2 for x in xs]
+
+def filter_pos(xs: list[int]) -> list[int]:
+    return [x for x in xs if x > 0]
+
+def identity(xs: list[int]) -> list[int]:
+    return [x for x in xs]
+"#;
+    let (report, rust) = transpile_source(src, "compr.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "simple list comps must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Comprehension),
+        "successfully lowered list comps must not leave Comprehension gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("xs.into_iter().map(|x| (x * 2)).collect::<Vec<_>>()"),
+        "map path: {rust}"
+    );
+    assert!(
+        rust.contains("xs.into_iter().filter(|x| (x > 0)).collect::<Vec<_>>()"),
+        "filter identity path: {rust}"
+    );
+    // identity: collect only, no map
+    assert!(
+        rust.contains("xs.into_iter().collect::<Vec<_>>()"),
+        "identity collect: {rust}"
+    );
+    // Isolate identity function body — must not introduce map for bare x
+    let id_start = rust.find("fn identity").expect("identity fn");
+    let id_body = &rust[id_start..];
+    assert!(
+        !id_body.contains(".map("),
+        "identity must skip map: {id_body}"
+    );
+}
+
+// --- MultiStmtBody: expression statements, rebinding, and honest declines ---
+
+#[test]
+fn expr_statement_method_call_lowers() {
+    // A bare expression statement kept for its side effect — the receiver-style
+    // call shape (`recv.method(...)`) is the one this lane accepts.
+    let src = "def touch(log: str) -> int:\n    log.push(1)\n    x = 1\n    return x\n";
+    let (report, rust) = transpile_source(src, "touch.py", None).unwrap();
+    assert!(report.emitted_items.contains(&"touch".into()));
+    assert!(
+        rust.contains("log.push(1);"),
+        "expected lowered expr-statement call, got:\n{rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "expr-statement call must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn rebinding_uses_shadowing_let() {
+    // Python `x = 1; x = 2` rebinds the same name to a new value of the same
+    // (or a compatible) type — Rust shadowing (`let x = 1; let x = 2;`) is the
+    // mechanically faithful lowering chosen here, not a `let mut` + reassign:
+    // each `x` in the Python source really is a fresh value, and shadowing is
+    // the only Rust construct that lets the type change between bindings the
+    // way Python's rebinding always could.
+    let src = "def rebind() -> int:\n    x = 1\n    x = 2\n    return x\n";
+    let (report, rust) = transpile_source(src, "rebind.py", None).unwrap();
+    assert!(report.emitted_items.contains(&"rebind".into()));
+    let count = rust.matches("let x =").count();
+    assert_eq!(
+        count, 2,
+        "expected two shadowing `let x =` bindings: {rust}"
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "shadowed rebind must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn print_builtin_stmt_still_gaps() {
+    // `print` has no same-named Rust free function — an unsupported sub-case
+    // of the expression-statement widening, so it must still decline honestly
+    // rather than emit text that looks like, but is not, valid Rust.
+    let src = "def announce(a: int) -> int:\n    print(a)\n    return a\n";
+    let (report, rust) = transpile_source(src, "announce.py", None).unwrap();
+    assert!(
+        rust.contains("GAP: FunctionBody") || rust.contains("todo!"),
+        "expected honest body placeholder, got:\n{rust}"
+    );
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "print(...) statement must still FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn augassign_to_undeclared_name_gaps_with_reason() {
+    // `total += 1` where `total` was never bound in this scope raises
+    // UnboundLocalError in real Python — must decline (not emit a reference to
+    // an undefined Rust binding) and name the offending target explicitly.
+    let src = "def broken() -> int:\n    total += 1\n    return total\n";
+    let (report, _rust) = transpile_source(src, "broken.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::MultiStmtBody
+                && g.reason.contains("total")
+                && g.reason.contains("UnboundLocalError")),
+        "expected a MultiStmtBody gap naming `total`: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn global_statement_gaps_with_reason() {
+    let src = "x = 0\n\ndef bump() -> int:\n    global x\n    x = x + 1\n    return x\n";
+    let (report, _rust) = transpile_source(src, "bump.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::MultiStmtBody && g.reason.contains("global")),
+        "expected a MultiStmtBody gap naming `global`: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn del_statement_gaps_with_reason() {
+    let src = "def drop_it() -> int:\n    x = 1\n    del x\n    return 0\n";
+    let (report, _rust) = transpile_source(src, "drop_it.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::MultiStmtBody && g.reason.contains("del ")),
+        "expected a MultiStmtBody gap naming `del`: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn nested_list_comprehension_declines() {
+    let src = r#"
+def nest(xss: list[list[int]]) -> list[int]:
+    return [x for xs in xss for x in xs]
+"#;
+    let (report, _) = transpile_source(src, "nest.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "nested gens must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
