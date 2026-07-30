@@ -85,7 +85,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ -f pyproject.toml ] && grep -q '\[tool.ruff' pyproject.toml 2>/dev/null; then
-            uv run ruff check . || python -m ruff check .
+            # No `|| python -m ruff check .` fallback. It did not act as a
+            # fallback: `uv run ruff` exits non-zero for LINT FINDINGS, not just
+            # for a missing ruff, so any real lint error triggered the second
+            # arm — which then died with `python: command not found` (exit 127)
+            # on this runner, where uv owns the interpreter and no bare `python`
+            # is on PATH. Every lint failure was reported as 127 with the actual
+            # findings scrolled off above it. uv run resolves ruff from the
+            # locked env; if that is broken the honest failure is the useful one.
+            uv run ruff check .
           else
             echo "ruff not configured — skip"
           fi
