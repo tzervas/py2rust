@@ -35,7 +35,6 @@ fn map_attribute(attr: &ast::ExprAttribute) -> Option<String> {
         // collections.abc containers map the same as builtins when bare (no params).
         ("collections", "abc") => None,
         _ => None,
-
     }
 }
 
@@ -240,6 +239,13 @@ pub enum IdentFix {
     Renamed,
 }
 
+/// True when `name` is a Rust keyword (strict or reserved) and therefore cannot
+/// be bound bare — used to flag `import x as <keyword>` / `from x import y as
+/// <keyword>` as a gap rather than silently emitting an unusable binding.
+pub fn is_rust_keyword(name: &str) -> bool {
+    RUST_KEYWORDS.contains(&name)
+}
+
 /// Turn a Python identifier into one `rustc` will accept.
 ///
 /// Found by the L3 gate, not by inspection: `tg-agent-relay` defines
@@ -289,6 +295,11 @@ pub fn is_erasable_import_module(module: &str) -> bool {
             | "typing_extensions"
             | "collections.abc"
             | "pathlib" // Path maps as PathBuf by bare name; runtime pathlib APIs still gap at call
+            // math has no Rust module equivalent: its surface is inherent f64
+            // methods (`x.sqrt()`) and `std::f64::consts::*`, neither of which
+            // needs a `use` line to exist — the Rust equivalent is already in
+            // the prelude, so emitting nothing here is correct, not a gap.
+            | "math"
     )
 }
 
@@ -373,7 +384,10 @@ mod type_map_tests {
     fn scalars_and_containers() {
         assert_eq!(map_type_expr(&ann("int")).as_deref(), Some("i64"));
         assert_eq!(map_type_expr(&ann("str")).as_deref(), Some("String"));
-        assert_eq!(map_type_expr(&ann("list[int]")).as_deref(), Some("Vec<i64>"));
+        assert_eq!(
+            map_type_expr(&ann("list[int]")).as_deref(),
+            Some("Vec<i64>")
+        );
         assert_eq!(
             map_type_expr(&ann("dict[str, int]")).as_deref(),
             Some("std::collections::HashMap<String, i64>")
@@ -492,5 +506,22 @@ mod import_map_tests {
         assert!(import_gap_reason("json").contains("serde_json"));
         assert!(import_gap_reason("re").contains("regex"));
         assert!(import_gap_reason("foo").contains("unmapped"));
+    }
+
+    #[test]
+    fn math_is_erasable_not_mappable_and_not_gapped_reason() {
+        assert!(is_erasable_import_module("math"));
+        // Erasable modules never go through is_mappable_import in dispatch, but
+        // confirm the table doesn't also carry a competing mapping entry.
+        assert_eq!(is_mappable_import("math"), None);
+    }
+
+    #[test]
+    fn keyword_alias_detection() {
+        assert!(is_rust_keyword("type"));
+        assert!(is_rust_keyword("move"));
+        assert!(is_rust_keyword("match"));
+        assert!(!is_rust_keyword("np"));
+        assert!(!is_rust_keyword("os"));
     }
 }
