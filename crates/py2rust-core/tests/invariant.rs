@@ -364,7 +364,10 @@ def double_list(xs: list[int]) -> list[int]:
 "#;
     let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "typing imports should erase: {:?}",
         report.emitted_items
     );
@@ -382,12 +385,9 @@ def double_list(xs: list[int]) -> list[int]:
         "list[int] should map:\n{rust}"
     );
     assert!(
-        !report
-            .gaps
-            .iter()
-            .any(|g| {
-                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
-            }),
+        !report.gaps.iter().any(|g| {
+            g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+        }),
         "clamp should lower: {:?}",
         report.gaps
     );
@@ -427,10 +427,7 @@ def sum_slice_ids(a: int, b: int) -> int:
         rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
         "expected for/range/break/continue:\n{rust}"
     );
-    assert!(
-        rust.contains("for i in a..b"),
-        "range(a,b) → a..b:\n{rust}"
-    );
+    assert!(rust.contains("for i in a..b"), "range(a,b) → a..b:\n{rust}");
 }
 
 #[test]
@@ -517,7 +514,10 @@ def id_path(p: Path) -> Path:
 "#;
     let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "type-only imports should erase: {:?}",
         report.emitted_items
     );
@@ -581,7 +581,10 @@ def method_call(p: list[int], n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "simple call/attr must not FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -605,7 +608,10 @@ def g(x: int) -> int:
 "#;
     let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "kwargs call must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -619,7 +625,10 @@ def g(xs: list[int]) -> int:
 "#;
     let (report, _) = transpile_source(src, "star.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "starargs must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -633,7 +642,10 @@ def g(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "free range must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -644,3 +656,70 @@ def g(n: int) -> int:
     );
 }
 
+#[test]
+fn simple_list_comprehension_lowers() {
+    let src = r#"
+def map_double(xs: list[int]) -> list[int]:
+    return [x * 2 for x in xs]
+
+def filter_pos(xs: list[int]) -> list[int]:
+    return [x for x in xs if x > 0]
+
+def identity(xs: list[int]) -> list[int]:
+    return [x for x in xs]
+"#;
+    let (report, rust) = transpile_source(src, "compr.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "simple list comps must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Comprehension),
+        "successfully lowered list comps must not leave Comprehension gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("xs.into_iter().map(|x| (x * 2)).collect::<Vec<_>>()"),
+        "map path: {rust}"
+    );
+    assert!(
+        rust.contains("xs.into_iter().filter(|x| (x > 0)).collect::<Vec<_>>()"),
+        "filter identity path: {rust}"
+    );
+    // identity: collect only, no map
+    assert!(
+        rust.contains("xs.into_iter().collect::<Vec<_>>()"),
+        "identity collect: {rust}"
+    );
+    // Isolate identity function body — must not introduce map for bare x
+    let id_start = rust.find("fn identity").expect("identity fn");
+    let id_body = &rust[id_start..];
+    assert!(
+        !id_body.contains(".map("),
+        "identity must skip map: {id_body}"
+    );
+}
+
+#[test]
+fn nested_list_comprehension_declines() {
+    let src = r#"
+def nest(xss: list[list[int]]) -> list[int]:
+    return [x for xs in xss for x in xs]
+"#;
+    let (report, _) = transpile_source(src, "nest.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "nested gens must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}

@@ -6,7 +6,10 @@
 
 use crate::emit::{class_gap_reason, emit_function, Emitted};
 use crate::gap::{Category, Gap, GapReport};
-use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident, IdentFix};
+use crate::map::{
+    import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident,
+    IdentFix,
+};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
@@ -284,7 +287,10 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
             }
             Outcome::Gapped {
                 category: Category::Import,
-                reason: format!("from {mod_name} import … — {}", import_gap_reason(&mod_name)),
+                reason: format!(
+                    "from {mod_name} import … — {}",
+                    import_gap_reason(&mod_name)
+                ),
                 item_name: Some(mod_name),
             }
         }
@@ -515,7 +521,7 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
 /// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
 /// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
 /// const-legal at L3 (`String` is not a const type).
-
+///
 /// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
 /// to a single `Name` target, and never an AugAssign or Delete target.
 fn module_const_eligible_names(body: &[ast::Stmt]) -> HashSet<String> {
@@ -867,9 +873,7 @@ n = None
             );
         }
         assert!(
-            !r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "literal assigns must not DynamicTyping-gap: {:?}",
             r.gaps
         );
@@ -911,9 +915,7 @@ RATE: float = 2
         let (r, rust) = transpile_source("x = some_call()\n", "dyn.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -925,9 +927,7 @@ RATE: float = 2
         let (r, _) = transpile_source("a = b = 1\n", "mt.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -935,9 +935,14 @@ RATE: float = 2
     }
     #[test]
     fn rebind_module_name_not_const() {
-        let (r, rust) = transpile_source("x = 1
+        let (r, rust) = transpile_source(
+            "x = 1
 x = 2
-", "rebind.py", None).unwrap();
+",
+            "rebind.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "rebound name must not emit const:
@@ -973,9 +978,14 @@ x = 2
 
     #[test]
     fn augassign_blocks_const() {
-        let (_r, rust) = transpile_source("x = 1
+        let (_r, rust) = transpile_source(
+            "x = 1
 x += 1
-", "aug.py", None).unwrap();
+",
+            "aug.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "AugAssign must block const:
@@ -983,4 +993,120 @@ x += 1
         );
     }
 
+    // --- Conservative local return-type inference (GapKind::DynamicTyping) ---
+
+    #[test]
+    fn unannotated_single_int_return_infers_i64_no_gap() {
+        let (r, rust) = transpile_source("def f():\n    return 5\n", "ret_int.py", None).unwrap();
+        assert!(r.never_silent_holds());
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "unambiguous literal return must not DynamicTyping-gap: {:?}",
+            r.gaps
+        );
+        assert!(rust.contains("fn f() -> i64"), "rust:\n{rust}");
+    }
+
+    #[test]
+    fn unannotated_float_return_infers_f64_no_gap() {
+        let (r, rust) =
+            transpile_source("def f():\n    return 1.5\n", "ret_float.py", None).unwrap();
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "gaps={:?}",
+            r.gaps
+        );
+        assert!(rust.contains("fn f() -> f64"), "rust:\n{rust}");
+    }
+
+    #[test]
+    fn unannotated_str_return_infers_string_no_gap() {
+        let (r, rust) =
+            transpile_source("def f():\n    return \"hi\"\n", "ret_str.py", None).unwrap();
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "gaps={:?}",
+            r.gaps
+        );
+        assert!(rust.contains("fn f() -> String"), "rust:\n{rust}");
+    }
+
+    #[test]
+    fn unannotated_bool_return_infers_bool_no_gap() {
+        let (r, rust) =
+            transpile_source("def f():\n    return True\n", "ret_bool.py", None).unwrap();
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
+            "gaps={:?}",
+            r.gaps
+        );
+        assert!(rust.contains("fn f() -> bool"), "rust:\n{rust}");
+    }
+
+    #[test]
+    fn unannotated_multi_branch_same_type_return_infers_no_gap() {
+        let src = "def f(x):\n    if x:\n        return 1\n    else:\n        return 2\n";
+        // Note: `x` itself still gaps (unannotated param) — that is separate
+        // and expected. The point here is the *return type* is not additionally
+        // gapped when both branches agree.
+        let (r, rust) = transpile_source(src, "ret_branch.py", None).unwrap();
+        assert!(rust.contains("fn f("), "rust:\n{rust}");
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping
+                && g.reason.contains("no return annotation")),
+            "both branches return i64 — no return-annotation gap expected: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn unannotated_branches_disagree_still_gaps() {
+        let src = "def f(x):\n    if x:\n        return 1\n    else:\n        return 1.5\n";
+        let (r, _rust) = transpile_source(src, "ret_ambig.py", None).unwrap();
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping
+                && g.reason.contains("no return annotation")),
+            "mismatched branch return types must stay an honest gap: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn unannotated_return_from_call_still_gaps() {
+        let src = "def f():\n    return some_call()\n";
+        let (r, _rust) = transpile_source(src, "ret_call.py", None).unwrap();
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping
+                && g.reason.contains("no return annotation")),
+            "return from an unmapped call must stay an honest gap: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn unannotated_return_of_param_still_gaps() {
+        // Function itself is `def f(x): return x` — `x` is unannotated so its
+        // type is unknown; the return type must not be guessed from it either.
+        let src = "def f(x):\n    return x\n";
+        let (r, _rust) = transpile_source(src, "ret_param.py", None).unwrap();
+        assert!(
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping
+                && g.reason.contains("no return annotation")),
+            "unknown-typed name return must stay an honest gap: {:?}",
+            r.gaps
+        );
+    }
+
+    #[test]
+    fn unannotated_return_of_annotated_param_infers_its_type() {
+        let src = "def f(x: int):\n    return x\n";
+        let (r, rust) = transpile_source(src, "ret_known_param.py", None).unwrap();
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping
+                && g.reason.contains("no return annotation")),
+            "returning an annotated param's own type is unambiguous: {:?}",
+            r.gaps
+        );
+        assert!(rust.contains("-> i64"), "rust:\n{rust}");
+    }
 }

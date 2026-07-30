@@ -118,16 +118,37 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
         ));
     }
 
+    // Params with a known (non-placeholder, non-guessed) type, available to
+    // return-type inference below. Built early — before the general `env` —
+    // because inference must run before the DynamicTyping gap decision.
+    let param_env: TypeEnv = arg_types
+        .iter()
+        .filter(|(_, t)| is_known_type(t))
+        .cloned()
+        .collect();
+
     let (ret_ty, ret_is_unit) = match func.returns.as_deref() {
         None => {
-            // Bare `def f():` — treat as dynamic unless body is empty pass-only.
-            if !is_pass_only_body(&func.body) {
-                sub_gaps.push(GapReason::new(
-                    Category::DynamicTyping,
-                    format!("function `{name}` has no return annotation — dynamic typing (README)"),
-                ));
+            // Bare `def f():` — treat as dynamic unless body is empty pass-only,
+            // or every `return <expr>` in the body forces the same unambiguous
+            // type (literal-driven, or a known-typed name/expr). Two branches
+            // returning different types, or any return whose type cannot be
+            // pinned down (unmapped call, unknown name, …) — decline, i.e. gap.
+            // Wrongly inferring here would be silent-semantics-changing Rust
+            // that compiles and misbehaves, which this project refuses.
+            match infer_return_type(&func.body, &param_env) {
+                _ if is_pass_only_body(&func.body) => ("i32".to_string(), false),
+                Some(t) => (t, false),
+                None => {
+                    sub_gaps.push(GapReason::new(
+                        Category::DynamicTyping,
+                        format!(
+                            "function `{name}` has no return annotation — dynamic typing (README)"
+                        ),
+                    ));
+                    ("i32".to_string(), false)
+                }
             }
-            ("i32".to_string(), false)
         }
         Some(r) if is_any_annotation(r) => {
             sub_gaps.push(GapReason::new(
@@ -154,10 +175,8 @@ pub fn emit_function(func: &ast::StmtFunctionDef, source: &str) -> Emitted {
 
     // Only known types enter the environment. Placeholders (`/* dyn */ i32`)
     // stay out so inference declines instead of reasoning from a guess.
-    let env: TypeEnv = arg_types
-        .into_iter()
-        .filter(|(_, t)| is_known_type(t))
-        .collect();
+    // (`param_env` above already extracted this same known subset of `arg_types`.)
+    let env: TypeEnv = param_env;
     // Params rebound across loop iterations need `mut` on the signature.
     let mut_names = names_needing_mut(&func.body, &env);
     let args_fmt: Vec<String> = args_out
@@ -404,8 +423,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -483,7 +502,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -508,7 +534,10 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -645,11 +674,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -699,6 +724,113 @@ fn forced_ty(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// Conservative literal-driven type of an expression, independent of any
+/// surrounding expected type — used only for return-type inference (no
+/// `-> T` annotation to lower against yet). Unlike [`forced_ty`], this *does*
+/// give int/float/str/bool/list literals their natural type, because here
+/// there is no annotation for them to adapt to — the literal's own type
+/// becomes the function's return type.
+///
+/// Anything not confidently one Rust type — an unmapped call, an unknown
+/// name, a mixed list — returns `None`, and the caller gaps rather than guesses.
+fn literal_driven_type(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
+    match expr {
+        ast::Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(_) => Some("i64".into()),
+            ast::Constant::Float(_) => Some("f64".into()),
+            ast::Constant::Bool(_) => Some("bool".into()),
+            ast::Constant::Str(_) => Some("String".into()),
+            _ => None,
+        },
+        ast::Expr::Name(n) => env.get(n.id.as_str()).cloned(),
+        ast::Expr::BinOp(b) => promote(
+            literal_driven_type(&b.left, env).as_deref(),
+            literal_driven_type(&b.right, env).as_deref(),
+        ),
+        ast::Expr::UnaryOp(u) => match u.op {
+            ast::UnaryOp::Not => Some("bool".into()),
+            _ => literal_driven_type(&u.operand, env),
+        },
+        ast::Expr::Compare(_) | ast::Expr::BoolOp(_) => Some("bool".into()),
+        ast::Expr::IfExp(i) => promote(
+            literal_driven_type(&i.body, env).as_deref(),
+            literal_driven_type(&i.orelse, env).as_deref(),
+        ),
+        // Elements must all agree on one type — a mixed-type list literal
+        // has no single honest Rust type here, so it declines.
+        ast::Expr::List(l) => {
+            let mut elem_ty: Option<String> = None;
+            for e in &l.elts {
+                let t = literal_driven_type(e, env)?;
+                match &elem_ty {
+                    None => elem_ty = Some(t),
+                    Some(prev) if *prev == t => {}
+                    Some(_) => return None,
+                }
+            }
+            // An empty list has no element type to infer honestly.
+            elem_ty.map(|t| format!("Vec<{t}>"))
+        }
+        _ => None,
+    }
+}
+
+/// Every `return <expr>` reachable in `body` (including inside `if`/`for`/
+/// `while`, not descending into nested `def`s), in source order.
+fn collect_return_values<'a>(body: &'a [ast::Stmt], out: &mut Vec<&'a ast::Expr>) {
+    for stmt in body {
+        match stmt {
+            ast::Stmt::Return(r) => {
+                if let Some(v) = r.value.as_deref() {
+                    out.push(v);
+                }
+            }
+            ast::Stmt::If(i) => {
+                collect_return_values(&i.body, out);
+                collect_return_values(&i.orelse, out);
+            }
+            ast::Stmt::For(f) => collect_return_values(&f.body, out),
+            ast::Stmt::While(w) => collect_return_values(&w.body, out),
+            // try/with bodies can also return; scanning them costs nothing —
+            // the function itself still gaps separately for Exception/etc.
+            ast::Stmt::Try(t) => {
+                collect_return_values(&t.body, out);
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(h) = h;
+                    collect_return_values(&h.body, out);
+                }
+                collect_return_values(&t.orelse, out);
+                collect_return_values(&t.finalbody, out);
+            }
+            ast::Stmt::With(w) => collect_return_values(&w.body, out),
+            _ => {}
+        }
+    }
+}
+
+/// Infer a missing `-> T` from every `return <expr>` in the body agreeing on
+/// one literal-driven type. No returns at all (falls off the end / unit-ish
+/// bodies), or any disagreement / unmappable return, is `None` — the caller
+/// keeps the honest DynamicTyping gap rather than guess.
+fn infer_return_type(body: &[ast::Stmt], param_env: &TypeEnv) -> Option<String> {
+    let mut returns = Vec::new();
+    collect_return_values(body, &mut returns);
+    if returns.is_empty() {
+        return None;
+    }
+    let mut ty: Option<String> = None;
+    for expr in returns {
+        let t = literal_driven_type(expr, param_env)?;
+        match &ty {
+            None => ty = Some(t),
+            Some(prev) if *prev == t => {}
+            // Two returns disagree on type — genuinely ambiguous, must gap.
+            Some(_) => return None,
+        }
+    }
+    ty
 }
 
 /// Combine two operand types. Float wins; otherwise they must agree.
@@ -867,8 +999,67 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             }
             Some(format!("{func}({})", args.join(", ")))
         }
+        ast::Expr::ListComp(lc) => lower_list_comp(lc, env),
         _ => None,
     }
+}
+
+/// Shape gate shared by emit + walk: what Wave B #52 actually lowers.
+fn is_simple_list_comp_shape(lc: &ast::ExprListComp) -> bool {
+    if lc.generators.len() != 1 {
+        return false;
+    }
+    let g = &lc.generators[0];
+    if g.is_async {
+        return false;
+    }
+    let ast::Expr::Name(n) = &g.target else {
+        return false;
+    };
+    !matches!(rust_ident(n.id.as_str()).1, IdentFix::Renamed)
+}
+
+/// Simple list comprehensions only: one generator, `Name` target, no async.
+///
+/// `[elt for x in xs]` → `xs.into_iter().map(|x| elt).collect::<Vec<_>>()`
+/// `[x for x in xs if p]` → filter then map/collect.
+/// Nested generators, unpack targets, and set/dict/genexps stay unlowered.
+fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
+    if !is_simple_list_comp_shape(lc) {
+        return None;
+    }
+    let g = &lc.generators[0];
+    let target = match &g.target {
+        ast::Expr::Name(n) => n.id.to_string(),
+        _ => return None,
+    };
+    let (rs_t, _) = rust_ident(&target);
+    let iter = lower_simple_expr_in(&g.iter, env, None)?;
+    // Bind the loop var so names inside elt/ifs lower (type unknown — rustc decides).
+    let mut local = env.clone();
+    local.insert(target.clone(), "/* dyn */".into());
+
+    let mut chain = format!("{iter}.into_iter()");
+    if !g.ifs.is_empty() {
+        let mut conds = Vec::new();
+        for pred in &g.ifs {
+            conds.push(lower_simple_expr_in(pred, &local, Some("bool"))?);
+        }
+        let cond = if conds.len() == 1 {
+            conds[0].clone()
+        } else {
+            format!("({})", conds.join(" && "))
+        };
+        chain.push_str(&format!(".filter(|{rs_t}| {cond})"));
+    }
+    // Identity `[x for x in xs]` skips map.
+    let is_identity = matches!(lc.elt.as_ref(), ast::Expr::Name(n) if n.id.as_str() == target);
+    if !is_identity {
+        let elt = lower_simple_expr_in(lc.elt.as_ref(), &local, None)?;
+        chain.push_str(&format!(".map(|{rs_t}| {elt})"));
+    }
+    chain.push_str(".collect::<Vec<_>>()");
+    Some(chain)
 }
 
 /// Render a Python constant as Rust, honouring an expected type for numerics.
@@ -883,6 +1074,13 @@ fn constant_to_rust_as(c: &ast::Constant, expected: Option<&str>) -> Option<Stri
         // emitted `1` and did not compile. `{:?}` keeps the point.
         ast::Constant::Float(f) => Some(format!("{f:?}")),
         ast::Constant::Bool(b) => Some(b.to_string()),
+        // `str` maps to owned `String` (`map_type_expr`), so a `&'static str`
+        // literal used where `String` is expected needs `.to_string()` or it
+        // is E0308 (expected `String`, found `&str`) — this bit for real on
+        // `fn f() -> str: return "hi"` before this arm existed.
+        ast::Constant::Str(s) if expected == Some("String") => {
+            Some(format!("{:?}.to_string()", s.as_str()))
+        }
         ast::Constant::Str(s) => Some(format!("{:?}", s.as_str())),
         ast::Constant::None => Some("()".into()),
         _ => None,
@@ -1168,8 +1366,18 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Expr::ListComp(lc) => {
-            out.push(comp_gap(fname, "list"));
+            // Only gap shapes we do *not* lower in `lower_list_comp`. Simple
+            // one-gen Name-target comps are real emission, not Comprehension debt.
+            if !is_simple_list_comp_shape(lc) {
+                out.push(comp_gap(fname, "list"));
+            }
             walk_expr(&lc.elt, fname, out);
+            for g in &lc.generators {
+                walk_expr(&g.iter, fname, out);
+                for pred in &g.ifs {
+                    walk_expr(pred, fname, out);
+                }
+            }
         }
         ast::Expr::SetComp(sc) => {
             out.push(comp_gap(fname, "set"));
@@ -1185,7 +1393,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {
