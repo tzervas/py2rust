@@ -6,7 +6,10 @@
 
 use crate::emit::{class_gap_reason, emit_function, Emitted};
 use crate::gap::{Category, Gap, GapReport};
-use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident, IdentFix};
+use crate::map::{
+    import_gap_reason, is_erasable_import_module, is_mappable_import, is_rust_keyword,
+    map_type_expr, rust_ident, IdentFix,
+};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
@@ -215,6 +218,25 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
         },
         ast::Stmt::Import(i) => {
             let names: Vec<_> = i.names.iter().map(|a| a.name.to_string()).collect();
+            // `import x as <rust keyword>` — the bound name can never appear bare in
+            // emitted Rust, so honesty requires a gap rather than scaffolding that
+            // downstream call sites cannot actually reference.
+            if let Some(bad) = i.names.iter().find_map(|a| {
+                let bound = a
+                    .asname
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| a.name.split('.').next().unwrap_or("").to_string());
+                is_rust_keyword(&bound).then_some(bound)
+            }) {
+                return Outcome::Gapped {
+                    category: Category::Import,
+                    reason: format!(
+                        "import alias `{bad}` collides with a Rust keyword — cannot bind bare (flag not guess)"
+                    ),
+                    item_name: Some(bad),
+                };
+            }
             // typing / __future__ leave no runtime residue once annotations resolve.
             if !names.is_empty() && names.iter().all(|n| is_erasable_import_module(n)) {
                 return Outcome::Emitted(Emitted {
@@ -268,6 +290,36 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
                     item_name: Some(mod_name),
                 };
             }
+            // `from x import *` cannot be mechanically enumerated — the set of
+            // names it binds depends on `x`'s runtime `__all__` / module dict,
+            // which this transpiler does not resolve. Flag, never guess.
+            if i.names.iter().any(|a| a.name.as_str() == "*") {
+                return Outcome::Gapped {
+                    category: Category::Import,
+                    reason: format!(
+                        "from {mod_name} import * not lowered — wildcard imports can't be mechanically enumerated (flag not guess)"
+                    ),
+                    item_name: Some(mod_name),
+                };
+            }
+            // `from x import y as <rust keyword>` — same reasoning as the plain
+            // `import` case above: the bound name is unusable bare in Rust.
+            if let Some(bad) = i.names.iter().find_map(|a| {
+                let bound = a
+                    .asname
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| a.name.to_string());
+                is_rust_keyword(&bound).then_some(bound)
+            }) {
+                return Outcome::Gapped {
+                    category: Category::Import,
+                    reason: format!(
+                        "from {mod_name} import alias `{bad}` collides with a Rust keyword — cannot bind bare (flag not guess)"
+                    ),
+                    item_name: Some(bad),
+                };
+            }
             if is_erasable_import_module(&mod_name) {
                 return Outcome::Emitted(Emitted {
                     name: format!("{ERASE_PREFIX}from:{mod_name}"),
@@ -284,7 +336,10 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
             }
             Outcome::Gapped {
                 category: Category::Import,
-                reason: format!("from {mod_name} import … — {}", import_gap_reason(&mod_name)),
+                reason: format!(
+                    "from {mod_name} import … — {}",
+                    import_gap_reason(&mod_name)
+                ),
                 item_name: Some(mod_name),
             }
         }
@@ -510,11 +565,11 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
     }
 }
 
-/// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant.
-///
-/// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
-/// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
-/// const-legal at L3 (`String` is not a const type).
+// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant.
+//
+// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
+// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
+// const-legal at L3 (`String` is not a const type).
 
 /// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
 /// to a single `Name` target, and never an AugAssign or Delete target.
@@ -849,6 +904,102 @@ mod tests {
     }
 
     #[test]
+    fn import_math_erases_no_rust_module_equivalent() {
+        // math's Rust equivalent is inherent f64 methods / std::f64::consts::*,
+        // neither of which needs a `use` line — nothing emitted is correct.
+        let (r, rust) = transpile_source("import math\n", "math.py", None).unwrap();
+        assert!(
+            r.emitted_items
+                .iter()
+                .any(|n| n == &format!("{ERASE_PREFIX}math")),
+            "math should erase cleanly: {:?}",
+            r.emitted_items
+        );
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::Import),
+            "math must not Import-gap: {:?}",
+            r.gaps
+        );
+        assert!(
+            !rust.contains("use "),
+            "math must emit no use lines (only the standard header): {rust:?}"
+        );
+    }
+
+    #[test]
+    fn from_typing_import_list_erases() {
+        let (r, rust) = transpile_source("from typing import List\n", "t.py", None).unwrap();
+        assert!(
+            r.emitted_items
+                .iter()
+                .any(|n| n == &format!("{ERASE_PREFIX}from:typing")),
+            "typing should erase: {:?}",
+            r.emitted_items
+        );
+        assert!(!r.gaps.iter().any(|g| g.category == Category::Import));
+        assert!(
+            !rust.contains("use "),
+            "typing must emit no use lines: {rust:?}"
+        );
+    }
+
+    #[test]
+    fn import_star_still_gaps() {
+        let (r, rust) = transpile_source("from os import *\n", "star.py", None).unwrap();
+        let gap = r
+            .gaps
+            .iter()
+            .find(|g| g.category == Category::Import)
+            .expect("wildcard import must Import-gap");
+        assert!(
+            gap.reason.contains('*') && gap.reason.contains("wildcard"),
+            "reason should call out the wildcard: {}",
+            gap.reason
+        );
+        assert!(
+            !rust.contains("use std::"),
+            "wildcard must not guess at use lines:\n{rust}"
+        );
+    }
+
+    #[test]
+    fn import_alias_colliding_with_keyword_still_gaps() {
+        // `import os as type` — "type" is a Rust keyword; the alias can't bind bare.
+        let (r, rust) = transpile_source("import os as type\n", "alias.py", None).unwrap();
+        let gap = r
+            .gaps
+            .iter()
+            .find(|g| g.category == Category::Import)
+            .expect("keyword-colliding alias must Import-gap");
+        assert!(
+            gap.reason.contains("type") && gap.reason.contains("keyword"),
+            "reason should name the alias and cause: {}",
+            gap.reason
+        );
+        assert!(
+            !rust.contains("use std::"),
+            "keyword-colliding alias must not emit scaffolding:\n{rust}"
+        );
+    }
+
+    #[test]
+    fn from_import_alias_colliding_with_keyword_still_gaps() {
+        // `from sys import argv as move` — "move" is a Rust keyword.
+        let (r, _) =
+            transpile_source("from sys import argv as move\n", "aliasfrom.py", None).unwrap();
+        let gap = r
+            .gaps
+            .iter()
+            .find(|g| g.category == Category::Import)
+            .expect("keyword-colliding from-import alias must Import-gap");
+        assert!(
+            gap.reason.contains("move") && gap.reason.contains("keyword"),
+            "reason should name the alias and cause: {}",
+            gap.reason
+        );
+    }
+
+    #[test]
     fn module_literal_assign_emits_const() {
         let src = r#"
 x = 1
@@ -867,9 +1018,7 @@ n = None
             );
         }
         assert!(
-            !r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "literal assigns must not DynamicTyping-gap: {:?}",
             r.gaps
         );
@@ -911,9 +1060,7 @@ RATE: float = 2
         let (r, rust) = transpile_source("x = some_call()\n", "dyn.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -925,9 +1072,7 @@ RATE: float = 2
         let (r, _) = transpile_source("a = b = 1\n", "mt.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -935,9 +1080,14 @@ RATE: float = 2
     }
     #[test]
     fn rebind_module_name_not_const() {
-        let (r, rust) = transpile_source("x = 1
+        let (r, rust) = transpile_source(
+            "x = 1
 x = 2
-", "rebind.py", None).unwrap();
+",
+            "rebind.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "rebound name must not emit const:
@@ -973,14 +1123,18 @@ x = 2
 
     #[test]
     fn augassign_blocks_const() {
-        let (_r, rust) = transpile_source("x = 1
+        let (_r, rust) = transpile_source(
+            "x = 1
 x += 1
-", "aug.py", None).unwrap();
+",
+            "aug.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "AugAssign must block const:
 {rust}"
         );
     }
-
 }
