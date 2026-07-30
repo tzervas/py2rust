@@ -364,7 +364,10 @@ def double_list(xs: list[int]) -> list[int]:
 "#;
     let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "typing imports should erase: {:?}",
         report.emitted_items
     );
@@ -382,12 +385,9 @@ def double_list(xs: list[int]) -> list[int]:
         "list[int] should map:\n{rust}"
     );
     assert!(
-        !report
-            .gaps
-            .iter()
-            .any(|g| {
-                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
-            }),
+        !report.gaps.iter().any(|g| {
+            g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+        }),
         "clamp should lower: {:?}",
         report.gaps
     );
@@ -427,10 +427,7 @@ def sum_slice_ids(a: int, b: int) -> int:
         rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
         "expected for/range/break/continue:\n{rust}"
     );
-    assert!(
-        rust.contains("for i in a..b"),
-        "range(a,b) → a..b:\n{rust}"
-    );
+    assert!(rust.contains("for i in a..b"), "range(a,b) → a..b:\n{rust}");
 }
 
 #[test]
@@ -517,7 +514,10 @@ def id_path(p: Path) -> Path:
 "#;
     let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "type-only imports should erase: {:?}",
         report.emitted_items
     );
@@ -581,7 +581,10 @@ def method_call(p: list[int], n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "simple call/attr must not FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -605,7 +608,10 @@ def g(x: int) -> int:
 "#;
     let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "kwargs call must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -619,7 +625,10 @@ def g(xs: list[int]) -> int:
 "#;
     let (report, _) = transpile_source(src, "star.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "starargs must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -633,7 +642,10 @@ def g(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "free range must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -644,3 +656,168 @@ def g(n: int) -> int:
     );
 }
 
+#[test]
+fn simple_list_comprehension_lowers() {
+    let src = r#"
+def map_double(xs: list[int]) -> list[int]:
+    return [x * 2 for x in xs]
+
+def filter_pos(xs: list[int]) -> list[int]:
+    return [x for x in xs if x > 0]
+
+def identity(xs: list[int]) -> list[int]:
+    return [x for x in xs]
+"#;
+    let (report, rust) = transpile_source(src, "compr.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "simple list comps must not FunctionBody-gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Comprehension),
+        "successfully lowered list comps must not leave Comprehension gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("xs.into_iter().map(|x| (x * 2)).collect::<Vec<_>>()"),
+        "map path: {rust}"
+    );
+    assert!(
+        rust.contains("xs.into_iter().filter(|x| (x > 0)).collect::<Vec<_>>()"),
+        "filter identity path: {rust}"
+    );
+    // identity: collect only, no map
+    assert!(
+        rust.contains("xs.into_iter().collect::<Vec<_>>()"),
+        "identity collect: {rust}"
+    );
+    // Isolate identity function body — must not introduce map for bare x
+    let id_start = rust.find("fn identity").expect("identity fn");
+    let id_body = &rust[id_start..];
+    assert!(
+        !id_body.contains(".map("),
+        "identity must skip map: {id_body}"
+    );
+}
+
+#[test]
+fn nested_list_comprehension_declines() {
+    let src = r#"
+def nest(xss: list[list[int]]) -> list[int]:
+    return [x for xs in xss for x in xs]
+"#;
+    let (report, _) = transpile_source(src, "nest.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "nested gens must FunctionBody-gap: {:?}",
+        report.gaps
+    );
+}
+
+#[test]
+fn lambda_assigned_and_called_lowers_to_closure() {
+    // `f = lambda x: x + 1` inside a function body → `let f = |x| (x + 1);`.
+    let src = "def make() -> int:\n    f = lambda x: x + 1\n    return f(2)\n";
+    let (report, rust) = transpile_source(src, "lam.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "body should lower fully with a closure: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("let f = |x| (x + 1);"),
+        "expected closure binding: {rust}"
+    );
+    assert!(
+        rust.contains("f(2)"),
+        "expected call through the closure: {rust}"
+    );
+}
+
+#[test]
+fn zero_arg_and_multi_arg_lambdas_lower() {
+    let src = "def make() -> int:\n    z = lambda: 42\n    add = lambda a, b: a + b\n    return add(z(), 1)\n";
+    let (report, rust) = transpile_source(src, "lam2.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "body should lower fully: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("let z = || 42;"),
+        "expected zero-arg closure: {rust}"
+    );
+    assert!(
+        rust.contains("let add = |a, b| (a + b);"),
+        "expected multi-arg closure: {rust}"
+    );
+}
+
+#[test]
+fn lambda_passed_directly_as_call_argument_lowers() {
+    // Lambdas passed straight into a call (not first bound to a name) lower too,
+    // since `lower_simple_expr_in` recurses into call arguments.
+    let src = "def make() -> int:\n    return apply(lambda x: x * 2, 5)\n";
+    let (report, rust) = transpile_source(src, "lam3.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "body should lower fully: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("apply(|x| (x * 2), 5)"),
+        "expected lambda lowered inline as a call argument: {rust}"
+    );
+}
+
+#[test]
+fn lambda_with_default_arg_declines_and_still_gaps() {
+    // Defaults have no closure-parameter equivalent in Rust — decline rather
+    // than guess a call-site rewrite. The whole function body still gets an
+    // honest FunctionBody gap (never a silently wrong `todo!`-free emit).
+    let src = "def make() -> int:\n    f = lambda x=1: x\n    return f(2)\n";
+    let (report, _rust) = transpile_source(src, "lam4.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "lambda with default arg must not silently lower: {:?}",
+        report.gaps
+    );
+    assert!(report.never_silent_holds());
+}
+
+#[test]
+fn lambda_with_varargs_declines_and_still_gaps() {
+    let src = "def make() -> int:\n    f = lambda *args: len(args)\n    return f(1, 2)\n";
+    let (report, _rust) = transpile_source(src, "lam5.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "lambda with *args must not silently lower: {:?}",
+        report.gaps
+    );
+    assert!(report.never_silent_holds());
+}

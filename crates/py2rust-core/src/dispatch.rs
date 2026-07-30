@@ -6,7 +6,10 @@
 
 use crate::emit::{class_gap_reason, emit_function, Emitted};
 use crate::gap::{Category, Gap, GapReport};
-use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident, IdentFix};
+use crate::map::{
+    import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident,
+    IdentFix,
+};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
@@ -284,7 +287,10 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
             }
             Outcome::Gapped {
                 category: Category::Import,
-                reason: format!("from {mod_name} import … — {}", import_gap_reason(&mod_name)),
+                reason: format!(
+                    "from {mod_name} import … — {}",
+                    import_gap_reason(&mod_name)
+                ),
                 item_name: Some(mod_name),
             }
         }
@@ -510,11 +516,12 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
     }
 }
 
-/// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant.
-///
-/// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
-/// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
-/// const-legal at L3 (`String` is not a const type).
+// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant.
+//
+// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
+// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
+// const-legal at L3 (`String` is not a const type).
+// (See `try_emit_module_literal_assign` / `try_emit_module_ann_assign` below.)
 
 /// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
 /// to a single `Name` target, and never an AugAssign or Delete target.
@@ -867,9 +874,7 @@ n = None
             );
         }
         assert!(
-            !r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "literal assigns must not DynamicTyping-gap: {:?}",
             r.gaps
         );
@@ -911,9 +916,7 @@ RATE: float = 2
         let (r, rust) = transpile_source("x = some_call()\n", "dyn.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -925,9 +928,7 @@ RATE: float = 2
         let (r, _) = transpile_source("a = b = 1\n", "mt.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -935,9 +936,14 @@ RATE: float = 2
     }
     #[test]
     fn rebind_module_name_not_const() {
-        let (r, rust) = transpile_source("x = 1
+        let (r, rust) = transpile_source(
+            "x = 1
 x = 2
-", "rebind.py", None).unwrap();
+",
+            "rebind.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "rebound name must not emit const:
@@ -973,14 +979,18 @@ x = 2
 
     #[test]
     fn augassign_blocks_const() {
-        let (_r, rust) = transpile_source("x = 1
+        let (_r, rust) = transpile_source(
+            "x = 1
 x += 1
-", "aug.py", None).unwrap();
+",
+            "aug.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "AugAssign must block const:
 {rust}"
         );
     }
-
 }
