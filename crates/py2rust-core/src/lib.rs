@@ -25,6 +25,7 @@ pub mod dispatch;
 pub mod emit;
 pub mod gap;
 pub mod interface;
+pub mod ir;
 pub mod map;
 pub mod myc_map;
 pub mod parse;
