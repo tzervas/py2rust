@@ -43,6 +43,14 @@ exclude = [
     "research/**",
     ".venv",
     "venv",
+    # Transpiler INPUT, not project source. These snippets are deliberately
+    # non-idiomatic — legacy `typing.List`/`Dict` (UP006/UP035), unused locals
+    # (F841), unsorted imports (I001) — because the corpus measures what the
+    # transpiler can express, and real-world Python is full of exactly these
+    # shapes. Linting them measures ruff; auto-fixing them would silently
+    # change the thing being measured. They are exercised by
+    # scripts/expressibility_report.py and expressibility_corpus.rs instead.
+    "tests/corpus/**",
 ]
 
 [tool.ruff.lint]
