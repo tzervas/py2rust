@@ -404,8 +404,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -483,7 +483,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -508,7 +515,10 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -645,11 +655,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -833,7 +839,17 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
         // Simple attribute access: `name.attr` / nested attrs already lowerable.
         // No method-map invention — rustc is the type check. Renamed idents decline.
         ast::Expr::Attribute(a) => {
-            let base = lower_simple_expr_in(a.value.as_ref(), env, None)?;
+            // `self` is UNRAWABLE (renames to `self_`) because a *free*
+            // variable named `self` cannot be a bare Rust identifier — but as
+            // a method receiver it always lowers to bare `self`, which is
+            // correct Rust, not a guess. Scoped to the attribute base only:
+            // a bare `self` expression elsewhere still declines, unchanged.
+            let base = if matches!(a.value.as_ref(), ast::Expr::Name(n) if n.id.as_str() == "self")
+            {
+                "self".to_string()
+            } else {
+                lower_simple_expr_in(a.value.as_ref(), env, None)?
+            };
             let (rs_attr, fix) = rust_ident(a.attr.as_str());
             if matches!(fix, IdentFix::Renamed) {
                 return None;
@@ -1254,7 +1270,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {
@@ -1326,6 +1345,366 @@ fn comp_gap(fname: &str, kind: &str) -> GapReason {
         Category::Comprehension,
         format!("{kind} comprehension inside `{fname}`"),
     )
+}
+
+/// Try to lower a Python class to a Rust `struct` + `impl` — the mechanically
+/// faithful core only (README Class). Returns `None` when any requirement
+/// below fails; the caller ([`crate::dispatch`]) keeps the hard [`Category::Class`]
+/// gap in that case — inheritance, metaclasses, decorators, `@property`,
+/// `@staticmethod`/`@classmethod`, and dunders other than `__init__` are all
+/// *design* decisions (trait mapping, `Display`/`PartialEq`, …), not mechanical
+/// lowerings, so they are never attempted here.
+///
+/// Requirements:
+/// - no base classes, no `metaclass=`, no class decorators;
+/// - an `__init__(self, ...)` where every non-`self` param is annotated and
+///   every body statement is exactly `self.<field> = <param name>` or
+///   `self.<field> = <int/float/bool literal>` — anything else means a field
+///   type would have to be guessed, so it gaps instead;
+/// - every other method takes `self` first, has no decorators, is not a
+///   dunder, and its body is only `self.<field> = <expr>` / `return <expr>` /
+///   `pass` statements over fields declared by `__init__`.
+///
+/// A method that does not fit is *not* silently dropped: it becomes a
+/// `Category::Class` sub-gap on the class's `Emitted` record.
+pub fn try_emit_class(class: &ast::StmtClassDef) -> Option<Emitted> {
+    if !class.bases.is_empty() || !class.keywords.is_empty() || !class.decorator_list.is_empty() {
+        return None;
+    }
+    let name = class.name.to_string();
+    let (rs_name, fix) = rust_ident(&name);
+    if matches!(fix, IdentFix::Renamed) {
+        return None;
+    }
+
+    let mut init: Option<&ast::StmtFunctionDef> = None;
+    let mut methods: Vec<&ast::StmtFunctionDef> = Vec::new();
+    for stmt in &class.body {
+        match stmt {
+            ast::Stmt::FunctionDef(f) if f.name.as_str() == "__init__" => init = Some(f),
+            ast::Stmt::FunctionDef(f) => methods.push(f),
+            ast::Stmt::Expr(e) if matches!(e.value.as_ref(), ast::Expr::Constant(c) if matches!(c.value, ast::Constant::Str(_))) =>
+            {
+                // Docstring — no Rust residue, not a gap.
+            }
+            ast::Stmt::Pass(_) => {}
+            // Class-level assignments (`x: int = 0` shared/class attrs), nested
+            // classes, etc. — not part of the faithful core yet.
+            _ => return None,
+        }
+    }
+    let init = init?;
+    if !init.decorator_list.is_empty() {
+        return None;
+    }
+
+    let mut init_params = init.args.posonlyargs.iter().chain(init.args.args.iter());
+    let first = init_params.next()?;
+    if first.def.arg.as_str() != "self" {
+        return None;
+    }
+    if !init.args.kwonlyargs.is_empty() || init.args.vararg.is_some() || init.args.kwarg.is_some() {
+        return None;
+    }
+
+    // Ordered ctor params + their Rust types (needed for `new`'s signature too).
+    let mut param_order: Vec<String> = Vec::new();
+    let mut param_types: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for arg in init_params {
+        let aname = arg.def.arg.to_string();
+        let ann = arg.def.annotation.as_deref()?;
+        if is_any_annotation(ann) {
+            return None;
+        }
+        let ty = map_type_expr(ann)?;
+        let (_, afix) = rust_ident(&aname);
+        if matches!(afix, IdentFix::Renamed) {
+            return None;
+        }
+        param_types.insert(aname.clone(), ty);
+        param_order.push(aname);
+    }
+
+    // `__init__` body: every statement is `self.<field> = <param-name-or-literal>`.
+    let mut field_py_names: Vec<String> = Vec::new();
+    let mut fields: Vec<(String, String)> = Vec::new(); // (rust field name, rust type)
+    let mut ctor_assigns: Vec<(String, String)> = Vec::new(); // (rust field name, rhs)
+    for stmt in &init.body {
+        let ast::Stmt::Assign(a) = stmt else {
+            return None;
+        };
+        if a.targets.len() != 1 {
+            return None;
+        }
+        let ast::Expr::Attribute(attr) = &a.targets[0] else {
+            return None;
+        };
+        let ast::Expr::Name(base) = attr.value.as_ref() else {
+            return None;
+        };
+        if base.id.as_str() != "self" {
+            return None;
+        }
+        let field = attr.attr.to_string();
+        let (rs_field, ffix) = rust_ident(&field);
+        if matches!(ffix, IdentFix::Renamed) {
+            return None;
+        }
+        let (ty, rhs) = match a.value.as_ref() {
+            ast::Expr::Name(n) => {
+                let pname = n.id.to_string();
+                let ty = param_types.get(&pname)?.clone();
+                let (rs_p, _) = rust_ident(&pname);
+                (ty, rs_p)
+            }
+            ast::Expr::Constant(c) => {
+                let ty = infer_const_field_type(&c.value)?;
+                let rhs = constant_to_rust_as(&c.value, Some(&ty))?;
+                (ty, rhs)
+            }
+            _ => return None,
+        };
+        if !field_py_names.contains(&field) {
+            field_py_names.push(field);
+            fields.push((rs_field.clone(), ty));
+        }
+        ctor_assigns.push((rs_field, rhs));
+    }
+    if fields.is_empty() {
+        return None;
+    }
+
+    let new_params: Vec<String> = param_order
+        .iter()
+        .map(|p| format!("{}: {}", rust_ident(p).0, param_types[p]))
+        .collect();
+
+    let mut rust = String::new();
+    rust.push_str(&format!("pub struct {rs_name} {{\n"));
+    for (f, t) in &fields {
+        rust.push_str(&format!("    pub {f}: {t},\n"));
+    }
+    rust.push_str("}\n\n");
+    rust.push_str(&format!("impl {rs_name} {{\n"));
+    rust.push_str(&format!(
+        "    pub fn new({}) -> Self {{\n",
+        new_params.join(", ")
+    ));
+    rust.push_str("        Self {\n");
+    for (f, rhs) in &ctor_assigns {
+        rust.push_str(&format!("            {f}: {rhs},\n"));
+    }
+    rust.push_str("        }\n    }\n");
+
+    let mut sub_gaps = Vec::new();
+    for m in &methods {
+        match try_emit_method(m, &field_py_names) {
+            Ok(method_rust) => {
+                rust.push('\n');
+                rust.push_str(&method_rust);
+            }
+            Err(reason) => {
+                sub_gaps.push(GapReason::new(
+                    Category::Class,
+                    format!(
+                        "method `{}` of class `{name}` not lowered — {reason}",
+                        m.name
+                    ),
+                ));
+            }
+        }
+    }
+    rust.push_str("}\n");
+
+    Some(Emitted {
+        name,
+        rust,
+        sub_gaps,
+    })
+}
+
+/// Field type for an `__init__` body literal (`self.f = 0`). Restricted to
+/// numeric/bool literals only — a string default would need a `.to_string()`
+/// decision the source does not make explicit, so that stays a gap instead.
+fn infer_const_field_type(c: &ast::Constant) -> Option<String> {
+    match c {
+        ast::Constant::Int(_) => Some("i64".into()),
+        ast::Constant::Float(_) => Some("f64".into()),
+        ast::Constant::Bool(_) => Some("bool".into()),
+        _ => None,
+    }
+}
+
+/// Try to lower one method to `fn name(&self / &mut self, ...) [-> T] { ... }`.
+/// `Err(reason)` on any shape this narrow lowering does not (yet) cover —
+/// the caller turns that into a `Category::Class` sub-gap, never a silent drop.
+fn try_emit_method(m: &ast::StmtFunctionDef, field_py_names: &[String]) -> Result<String, String> {
+    let mname = m.name.as_str();
+    if mname != "__init__" && mname.starts_with("__") && mname.ends_with("__") {
+        return Err(format!(
+            "dunder `{mname}` not lowered (e.g. __str__→Display, __eq__→PartialEq are real \
+             future wins, but a deliberate design choice, not a mechanical one)"
+        ));
+    }
+    if !m.decorator_list.is_empty() {
+        return Err(
+            "decorator present (@property/@staticmethod/@classmethod/etc. are not \
+             trivially mappable — flag not guess)"
+                .to_string(),
+        );
+    }
+    let mut params_iter = m.args.posonlyargs.iter().chain(m.args.args.iter());
+    let Some(first) = params_iter.next() else {
+        return Err("no parameters — methods without `self` need @staticmethod/@classmethod handling, not covered".to_string());
+    };
+    if first.def.arg.as_str() != "self" {
+        return Err("first parameter is not `self`".to_string());
+    }
+    if !m.args.kwonlyargs.is_empty() || m.args.vararg.is_some() || m.args.kwarg.is_some() {
+        return Err("*args/**kwargs/keyword-only params not lowered".to_string());
+    }
+
+    let mut sig_params: Vec<String> = Vec::new();
+    for arg in params_iter {
+        let aname = arg.def.arg.to_string();
+        let Some(ann) = arg.def.annotation.as_deref() else {
+            return Err(format!("parameter `{aname}` has no type annotation"));
+        };
+        if is_any_annotation(ann) {
+            return Err(format!("parameter `{aname}` annotated Any"));
+        }
+        let Some(ty) = map_type_expr(ann) else {
+            return Err(format!("parameter `{aname}` has an unmapped annotation"));
+        };
+        let (rs_a, afix) = rust_ident(&aname);
+        if matches!(afix, IdentFix::Renamed) {
+            return Err(format!(
+                "parameter `{aname}` is a Rust keyword with no raw form"
+            ));
+        }
+        sig_params.push(format!("{rs_a}: {ty}"));
+    }
+
+    let needs_mut = m.body.iter().any(|s| {
+        matches!(s, ast::Stmt::Assign(a) if a.targets.len() == 1
+            && matches!(&a.targets[0], ast::Expr::Attribute(attr)
+                if matches!(attr.value.as_ref(), ast::Expr::Name(n) if n.id.as_str() == "self")))
+    });
+    let self_param = if needs_mut { "&mut self" } else { "&self" };
+
+    let (ret_ty, ret_is_unit) = match m.returns.as_deref() {
+        None => (None, true),
+        Some(r) if is_any_annotation(r) => {
+            return Err("return annotated Any".to_string());
+        }
+        Some(r) => {
+            let Some(t) = map_type_expr(r) else {
+                return Err("unmapped return annotation".to_string());
+            };
+            let unit = t == "()";
+            (if unit { None } else { Some(t) }, unit)
+        }
+    };
+
+    let empty_env: TypeEnv = TypeEnv::new();
+    let mut lines: Vec<String> = Vec::new();
+    let last = m.body.len().saturating_sub(1);
+    for (i, stmt) in m.body.iter().enumerate() {
+        let is_tail = i == last;
+        match stmt {
+            ast::Stmt::Pass(_) => {}
+            ast::Stmt::Return(r) => match r.value.as_deref() {
+                None => {
+                    if !ret_is_unit {
+                        return Err(
+                            "bare `return` in a method with a non-None return type".to_string()
+                        );
+                    }
+                    if !is_tail {
+                        lines.push("        return;".to_string());
+                    }
+                }
+                Some(expr) => {
+                    if ret_is_unit {
+                        return Err(
+                            "`return <value>` in a method with no/None return type".to_string()
+                        );
+                    }
+                    let Some(rt) = lower_simple_expr_in(expr, &empty_env, ret_ty.as_deref()) else {
+                        return Err("return expression not lowerable".to_string());
+                    };
+                    if is_tail {
+                        lines.push(format!("        {rt}"));
+                    } else {
+                        lines.push(format!("        return {rt};"));
+                    }
+                }
+            },
+            ast::Stmt::Assign(a) => {
+                if a.targets.len() != 1 {
+                    return Err("multi-target assignment not lowered".to_string());
+                }
+                let ast::Expr::Attribute(attr) = &a.targets[0] else {
+                    return Err("assignment target is not `self.<field>`".to_string());
+                };
+                let ast::Expr::Name(base) = attr.value.as_ref() else {
+                    return Err("assignment target is not `self.<field>`".to_string());
+                };
+                if base.id.as_str() != "self" {
+                    return Err("assignment target is not `self.<field>`".to_string());
+                }
+                let field = attr.attr.to_string();
+                if !field_py_names.contains(&field) {
+                    return Err(format!(
+                        "assigns `self.{field}`, which `__init__` never declared — Rust structs \
+                         cannot grow fields dynamically"
+                    ));
+                }
+                let (rs_field, ffix) = rust_ident(&field);
+                if matches!(ffix, IdentFix::Renamed) {
+                    return Err(format!(
+                        "field `{field}` is a Rust keyword with no raw form"
+                    ));
+                }
+                let Some(rhs) = lower_simple_expr_in(&a.value, &empty_env, None) else {
+                    return Err("assigned expression not lowerable".to_string());
+                };
+                lines.push(format!("        self.{rs_field} = {rhs};"));
+            }
+            _ => {
+                return Err(
+                    "statement shape not lowered (only self.field assign / return / pass)"
+                        .to_string(),
+                )
+            }
+        }
+    }
+
+    let (rs_mname, mfix) = rust_ident(mname);
+    if matches!(mfix, IdentFix::Renamed) {
+        return Err(format!(
+            "method name `{mname}` is a Rust keyword with no raw form"
+        ));
+    }
+    let params_joined = if sig_params.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", sig_params.join(", "))
+    };
+    let sig = match &ret_ty {
+        Some(t) => format!("    pub fn {rs_mname}({self_param}{params_joined}) -> {t} {{"),
+        None => format!("    pub fn {rs_mname}({self_param}{params_joined}) {{"),
+    };
+    let mut out = String::new();
+    out.push_str(&sig);
+    out.push('\n');
+    for l in &lines {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out.push_str("    }\n");
+    Ok(out)
 }
 
 /// Emit a class as a hard Class gap (dispatch handles structure).

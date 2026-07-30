@@ -4,9 +4,12 @@
 //! never neither. Ported process from mycelium-transpile `transpile::dispatch_item`, adapted
 //! to Python `Stmt` variants.
 
-use crate::emit::{class_gap_reason, emit_function, Emitted};
+use crate::emit::{class_gap_reason, emit_function, try_emit_class, Emitted};
 use crate::gap::{Category, Gap, GapReport};
-use crate::map::{import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident, IdentFix};
+use crate::map::{
+    import_gap_reason, is_erasable_import_module, is_mappable_import, map_type_expr, rust_ident,
+    IdentFix,
+};
 use crate::source_loc::{line_col, snippet};
 use rustpython_parser::ast::{self, Ranged};
 use rustpython_parser::{Parse, ParseError};
@@ -181,7 +184,14 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
             item_name: Some(f.name.to_string()),
         },
         ast::Stmt::ClassDef(c) => {
-            // Classes always hard-gap (README). Extra metaprogramming signals as additional reason text.
+            // Mechanically faithful core: struct + impl for `__init__`-shaped
+            // classes with no inheritance/metaclass/decorators (see
+            // `try_emit_class`). Anything outside that shape keeps the hard
+            // Class gap below — inheritance/metaclasses/@property/etc. are
+            // design decisions, not mechanical lowerings (README).
+            if let Some(em) = try_emit_class(c) {
+                return Outcome::Emitted(em);
+            }
             let gr = class_gap_reason(c);
             let mut reason = gr.reason;
             if !c.decorator_list.is_empty()
@@ -284,7 +294,10 @@ pub fn dispatch_stmt(stmt: &ast::Stmt, source: &str, const_eligible: &HashSet<St
             }
             Outcome::Gapped {
                 category: Category::Import,
-                reason: format!("from {mod_name} import … — {}", import_gap_reason(&mod_name)),
+                reason: format!(
+                    "from {mod_name} import … — {}",
+                    import_gap_reason(&mod_name)
+                ),
                 item_name: Some(mod_name),
             }
         }
@@ -515,7 +528,7 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
 /// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
 /// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
 /// const-legal at L3 (`String` is not a const type).
-
+///
 /// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
 /// to a single `Name` target, and never an AugAssign or Delete target.
 fn module_const_eligible_names(body: &[ast::Stmt]) -> HashSet<String> {
@@ -723,6 +736,59 @@ mod tests {
     }
 
     #[test]
+    fn simple_class_lowers_to_struct_and_impl() {
+        let src = "class Point:\n\
+                    \x20   def __init__(self, x: int, y: int):\n\
+                    \x20       self.x = x\n\
+                    \x20       self.y = y\n\
+                    \x20   def dist2(self) -> int:\n\
+                    \x20       return self.x * self.x + self.y * self.y\n\
+                    \x20   def shift(self, dx: int) -> None:\n\
+                    \x20       self.x = self.x + dx\n";
+        let (r, rust) = transpile_source(src, "point.py", None).unwrap();
+        assert!(r.emitted_items.iter().any(|n| n == "Point"), "{r:?}");
+        assert!(
+            !r.gaps.iter().any(|g| g.category == Category::Class),
+            "{:?}",
+            r.gaps
+        );
+        assert!(rust.contains("pub struct Point {"));
+        assert!(rust.contains("pub x: i64,"));
+        assert!(rust.contains("pub y: i64,"));
+        assert!(rust.contains("pub fn new(x: i64, y: i64) -> Self {"));
+        // Read-only method stays `&self`; field-mutating method gets `&mut self`.
+        assert!(rust.contains("pub fn dist2(&self) -> i64 {"));
+        assert!(rust.contains("pub fn shift(&mut self, dx: i64) {"));
+    }
+
+    #[test]
+    fn class_with_inheritance_still_gaps() {
+        // Subclassing has no mechanical Rust mapping (trait design decision) —
+        // must still report a Class gap, never silently drop the base.
+        let src = "class Dog(Animal):\n\
+                    \x20   def __init__(self, name: str):\n\
+                    \x20       self.name = name\n";
+        let (r, _rust) = transpile_source(src, "dog.py", None).unwrap();
+        assert!(!r.emitted_items.iter().any(|n| n == "Dog"), "{r:?}");
+        assert!(r
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Class && g.item_name.as_deref() == Some("Dog")));
+    }
+
+    #[test]
+    fn class_init_with_computed_field_gaps_not_guessed() {
+        // `self.total = a + b` is not `self.f = param`; the field type would
+        // have to be guessed, so this stays a gap rather than an emitted struct.
+        let src = "class Sum:\n\
+                    \x20   def __init__(self, a: int, b: int):\n\
+                    \x20       self.total = a + b\n";
+        let (r, _rust) = transpile_source(src, "sum.py", None).unwrap();
+        assert!(!r.emitted_items.iter().any(|n| n == "Sum"), "{r:?}");
+        assert!(r.gaps.iter().any(|g| g.category == Category::Class));
+    }
+
+    #[test]
     fn emits_simple_function() {
         let (r, rust) =
             transpile_source("def answer() -> int:\n    return 42\n", "a.py", None).unwrap();
@@ -867,9 +933,7 @@ n = None
             );
         }
         assert!(
-            !r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            !r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "literal assigns must not DynamicTyping-gap: {:?}",
             r.gaps
         );
@@ -911,9 +975,7 @@ RATE: float = 2
         let (r, rust) = transpile_source("x = some_call()\n", "dyn.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -925,9 +987,7 @@ RATE: float = 2
         let (r, _) = transpile_source("a = b = 1\n", "mt.py", None).unwrap();
         assert!(r.never_silent_holds());
         assert!(
-            r.gaps
-                .iter()
-                .any(|g| g.category == Category::DynamicTyping),
+            r.gaps.iter().any(|g| g.category == Category::DynamicTyping),
             "gaps={:?}",
             r.gaps
         );
@@ -935,9 +995,14 @@ RATE: float = 2
     }
     #[test]
     fn rebind_module_name_not_const() {
-        let (r, rust) = transpile_source("x = 1
+        let (r, rust) = transpile_source(
+            "x = 1
 x = 2
-", "rebind.py", None).unwrap();
+",
+            "rebind.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "rebound name must not emit const:
@@ -973,14 +1038,18 @@ x = 2
 
     #[test]
     fn augassign_blocks_const() {
-        let (_r, rust) = transpile_source("x = 1
+        let (_r, rust) = transpile_source(
+            "x = 1
 x += 1
-", "aug.py", None).unwrap();
+",
+            "aug.py",
+            None,
+        )
+        .unwrap();
         assert!(
             !rust.contains("const x"),
             "AugAssign must block const:
 {rust}"
         );
     }
-
 }
