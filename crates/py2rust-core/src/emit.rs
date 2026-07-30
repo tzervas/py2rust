@@ -404,8 +404,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -483,7 +483,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -500,6 +507,14 @@ fn try_lower_body(
             ast::Stmt::Continue(_) => {
                 lines.push("    continue;".into());
             }
+            ast::Stmt::Try(t) => {
+                let (line, binding) =
+                    lower_try_except(t, &local_env, ret_ty, is_tail, &mut_names, rebind_forbidden)?;
+                if let Some((n, ty)) = binding {
+                    local_env.insert(n, ty);
+                }
+                lines.push(line);
+            }
             _ => return None,
         }
     }
@@ -508,7 +523,11 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+                    || matches!(s, ast::Stmt::Try(t) if is_supported_try_except_shape(t))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -645,11 +664,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -930,6 +945,145 @@ fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
     Some(chain)
 }
 
+/// Recognized "fallible expression" for try/except lowering: currently only
+/// `int(<expr>)`, which Python raises `ValueError` from on bad input the same
+/// way Rust's `str::parse::<i64>()` returns `Err`. This is deliberately the
+/// *only* fallible shape recognized — anything else (arbitrary calls, indexing,
+/// division) has no confirmed Result-shaped Rust counterpart here, so guessing
+/// would be exactly the silent-semantics-change this transpiler refuses to do.
+fn is_int_call(expr: &ast::Expr) -> bool {
+    matches!(expr, ast::Expr::Call(c)
+        if matches!(c.func.as_ref(), ast::Expr::Name(n) if n.id.as_str() == "int")
+            && c.args.len() == 1
+            && c.keywords.is_empty())
+}
+
+fn lower_fallible_expr(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
+    let ast::Expr::Call(call) = expr else {
+        return None;
+    };
+    if !is_int_call(expr) {
+        return None;
+    }
+    let inner = lower_simple_expr_in(&call.args[0], env, None)?;
+    Some(format!("{inner}.parse::<i64>()"))
+}
+
+/// Single-handler except clause we are willing to treat as "matches the Err
+/// arm of the fallible expression". Restricted to `except ValueError:` /
+/// `except Exception:` (the two classes `int()` can plausibly raise from bad
+/// *string* content) with no `as name` binding — we discard the error value
+/// entirely (`Err(_)`), so binding it would silently drop information a
+/// human wrote code expecting to use.
+fn is_supported_except_handler(h: &ast::ExceptHandler) -> bool {
+    let ast::ExceptHandler::ExceptHandler(h) = h;
+    if h.name.is_some() {
+        return false;
+    }
+    matches!(
+        h.type_.as_deref(),
+        Some(ast::Expr::Name(n)) if matches!(n.id.as_str(), "ValueError" | "Exception")
+    )
+}
+
+/// Structural (env-independent) shape gate: single try stmt, single except
+/// handler of a supported class, no `else`/`finally`, and the try body is a
+/// recognized fallible expression assigned to (or returned as) the same shape
+/// the handler produces. Shared by the emit path and the gap-scan walk so the
+/// two never disagree about what counts as "handled".
+fn is_supported_try_except_shape(t: &ast::StmtTry) -> bool {
+    if t.handlers.len() != 1 || !t.orelse.is_empty() || !t.finalbody.is_empty() || t.body.len() != 1
+    {
+        return false;
+    }
+    if !is_supported_except_handler(&t.handlers[0]) {
+        return false;
+    }
+    let ast::ExceptHandler::ExceptHandler(handler) = &t.handlers[0];
+    if handler.body.len() != 1 {
+        return false;
+    }
+    match (&t.body[0], &handler.body[0]) {
+        (ast::Stmt::Assign(ta), ast::Stmt::Assign(ea)) => {
+            ta.targets.len() == 1
+                && ea.targets.len() == 1
+                && matches!((&ta.targets[0], &ea.targets[0]),
+                    (ast::Expr::Name(tn), ast::Expr::Name(en)) if tn.id == en.id)
+                && is_int_call(&ta.value)
+        }
+        (ast::Stmt::Return(tr), ast::Stmt::Return(er)) => {
+            tr.value.as_deref().is_some_and(is_int_call) && er.value.is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Mechanical `try: X except E: Y` -> `match X { Ok(v) => v, Err(_) => Y }` lowering,
+/// restricted to the shapes [`is_supported_try_except_shape`] accepts. Anything
+/// wider (multi-statement bodies, multiple/heterogeneous handlers, `else`,
+/// `finally`, re-raise, exception chaining) declines here and falls through to
+/// the honest `Category::Exception` / `Category::FunctionBody` gap — never a
+/// guessed lowering of non-local control flow.
+///
+/// Returns the emitted line plus an optional `(name, type)` to bind into the
+/// caller's local env (for the assignment shape).
+fn lower_try_except(
+    t: &ast::StmtTry,
+    env: &TypeEnv,
+    ret_ty: Option<&str>,
+    is_tail: bool,
+    mut_names: &HashSet<String>,
+    rebind_forbidden: Option<&TypeEnv>,
+) -> Option<(String, Option<(String, String)>)> {
+    if !is_supported_try_except_shape(t) {
+        return None;
+    }
+    let ast::ExceptHandler::ExceptHandler(handler) = &t.handlers[0];
+    match (&t.body[0], &handler.body[0]) {
+        (ast::Stmt::Assign(ta), ast::Stmt::Assign(ea)) => {
+            let ast::Expr::Name(tn) = &ta.targets[0] else {
+                return None;
+            };
+            let name = tn.id.to_string();
+            let (rs_name, fix) = rust_ident(&name);
+            if matches!(fix, IdentFix::Renamed) {
+                return None;
+            }
+            let ok_expr = lower_fallible_expr(&ta.value, env)?;
+            let err_expr = lower_simple_expr_in(&ea.value, env, Some("i64"))?;
+            let matched = format!("match {ok_expr} {{ Ok(v) => v, Err(_) => {err_expr} }}");
+            let (line, binding) = if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
+                (format!("    {rs_name} = {matched};"), None)
+            } else if mut_names.contains(&name) && !env.contains_key(&name) {
+                (
+                    format!("    let mut {rs_name} = {matched};"),
+                    Some((name, "i64".to_string())),
+                )
+            } else if mut_names.contains(&name) && env.contains_key(&name) {
+                (format!("    {rs_name} = {matched};"), None)
+            } else {
+                (
+                    format!("    let {rs_name} = {matched};"),
+                    Some((name, "i64".to_string())),
+                )
+            };
+            Some((line, binding))
+        }
+        (ast::Stmt::Return(tr), ast::Stmt::Return(er)) => {
+            let ok_expr = lower_fallible_expr(tr.value.as_deref()?, env)?;
+            let err_expr = lower_simple_expr_in(er.value.as_deref()?, env, ret_ty.or(Some("i64")))?;
+            let matched = format!("match {ok_expr} {{ Ok(v) => v, Err(_) => {err_expr} }}");
+            let line = if is_tail {
+                format!("    {matched}")
+            } else {
+                format!("    return {matched};")
+            };
+            Some((line, None))
+        }
+        _ => None,
+    }
+}
+
 /// Render a Python constant as Rust, honouring an expected type for numerics.
 fn constant_to_rust_as(c: &ast::Constant, expected: Option<&str>) -> Option<String> {
     match c {
@@ -1096,10 +1250,14 @@ fn walk_stmt(stmt: &ast::Stmt, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Stmt::Try(t) => {
-            out.push(GapReason::new(
-                Category::Exception,
-                format!("try/except inside `{fname}`"),
-            ));
+            // Only gap shapes `lower_try_except` does *not* handle — a supported
+            // single-fallible-expression try/except is real emission, not debt.
+            if !is_supported_try_except_shape(t) {
+                out.push(GapReason::new(
+                    Category::Exception,
+                    format!("try/except inside `{fname}`"),
+                ));
+            }
             for s in &t.body {
                 walk_stmt(s, fname, out);
             }
@@ -1254,7 +1412,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {

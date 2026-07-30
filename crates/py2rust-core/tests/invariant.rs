@@ -364,7 +364,10 @@ def double_list(xs: list[int]) -> list[int]:
 "#;
     let (report, rust) = transpile_source(src, "ifelse.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "typing imports should erase: {:?}",
         report.emitted_items
     );
@@ -382,12 +385,9 @@ def double_list(xs: list[int]) -> list[int]:
         "list[int] should map:\n{rust}"
     );
     assert!(
-        !report
-            .gaps
-            .iter()
-            .any(|g| {
-                g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
-            }),
+        !report.gaps.iter().any(|g| {
+            g.category == Category::FunctionBody && g.item_name.as_deref() == Some("clamp")
+        }),
         "clamp should lower: {:?}",
         report.gaps
     );
@@ -427,10 +427,7 @@ def sum_slice_ids(a: int, b: int) -> int:
         rust.contains("for i in 0..n") && rust.contains("continue;") && rust.contains("break;"),
         "expected for/range/break/continue:\n{rust}"
     );
-    assert!(
-        rust.contains("for i in a..b"),
-        "range(a,b) → a..b:\n{rust}"
-    );
+    assert!(rust.contains("for i in a..b"), "range(a,b) → a..b:\n{rust}");
 }
 
 #[test]
@@ -517,7 +514,10 @@ def id_path(p: Path) -> Path:
 "#;
     let (report, _rust) = transpile_source(src, "erase_more.py", None).unwrap();
     assert!(
-        report.emitted_items.iter().any(|n| n.starts_with("#erase:")),
+        report
+            .emitted_items
+            .iter()
+            .any(|n| n.starts_with("#erase:")),
         "type-only imports should erase: {:?}",
         report.emitted_items
     );
@@ -581,7 +581,10 @@ def method_call(p: list[int], n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "call_attr.py", None).unwrap();
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "simple call/attr must not FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -605,7 +608,10 @@ def g(x: int) -> int:
 "#;
     let (report, _) = transpile_source(src, "kwargs.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "kwargs call must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -619,7 +625,10 @@ def g(xs: list[int]) -> int:
 "#;
     let (report, _) = transpile_source(src, "star.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "starargs must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -633,7 +642,10 @@ def g(n: int) -> int:
 "#;
     let (report, rust) = transpile_source(src, "free_range.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "free range must FunctionBody-gap: {:?}",
         report.gaps
     );
@@ -658,12 +670,18 @@ def identity(xs: list[int]) -> list[int]:
 "#;
     let (report, rust) = transpile_source(src, "compr.py", None).unwrap();
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "simple list comps must not FunctionBody-gap: {:?}",
         report.gaps
     );
     assert!(
-        !report.gaps.iter().any(|g| g.category == Category::Comprehension),
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Comprehension),
         "successfully lowered list comps must not leave Comprehension gap: {:?}",
         report.gaps
     );
@@ -697,8 +715,115 @@ def nest(xss: list[list[int]]) -> list[int]:
 "#;
     let (report, _) = transpile_source(src, "nest.py", None).unwrap();
     assert!(
-        report.gaps.iter().any(|g| g.category == Category::FunctionBody),
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
         "nested gens must FunctionBody-gap: {:?}",
         report.gaps
+    );
+}
+
+/// Happy path: `try: X except E: Y` with X a single fallible expression
+/// (`int(...)`) lowers to a Rust `match … { Ok(v) => v, Err(_) => … }` —
+/// both the assign shape and the tail-return shape — with no Exception or
+/// FunctionBody gap.
+#[test]
+fn try_except_fallible_int_parse_lowers() {
+    let src = r#"
+def parse_or(s: str) -> int:
+    try:
+        x = int(s)
+    except ValueError:
+        x = -1
+    return x
+
+def parse_or_tail(s: str) -> int:
+    try:
+        return int(s)
+    except ValueError:
+        return -1
+"#;
+    let (report, rust) = transpile_source(src, "try_ok.py", None).unwrap();
+    assert!(
+        !report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::Exception || g.category == Category::FunctionBody),
+        "supported try/except int-parse shape must not gap: {:?}",
+        report.gaps
+    );
+    assert!(
+        rust.contains("match s.parse::<i64>() { Ok(v) => v, Err(_) => (-1) };"),
+        "assign-shape match arm missing: {rust}"
+    );
+    assert!(
+        rust.contains("match s.parse::<i64>() { Ok(v) => v, Err(_) => (-1) }\n}"),
+        "tail-return-shape match arm missing: {rust}"
+    );
+}
+
+/// STILL GAP, loudly: shapes this lane deliberately declines rather than
+/// guess at — multi-statement try body (ambiguous failure point), `finally`,
+/// and a non-fallible try expression (no confirmed Result-shaped Rust
+/// counterpart). All three must still carry an honest Exception/FunctionBody
+/// gap, never a silently-wrong lowering.
+#[test]
+fn try_except_unsupported_shapes_still_gap() {
+    let multi_stmt = r#"
+def risky(s: str) -> int:
+    try:
+        y = 1
+        x = int(s)
+    except ValueError:
+        x = -1
+    return x
+"#;
+    let (report, _) = transpile_source(multi_stmt, "multi.py", None).unwrap();
+    assert!(
+        report
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "multi-statement try body (ambiguous failure point) must gap: {:?}",
+        report.gaps
+    );
+
+    let has_finally = r#"
+def risky2(s: str) -> int:
+    try:
+        x = int(s)
+    except ValueError:
+        x = -1
+    finally:
+        pass
+    return x
+"#;
+    let (report2, _) = transpile_source(has_finally, "finally.py", None).unwrap();
+    assert!(
+        report2
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "try/finally (drop semantics differ) must gap: {:?}",
+        report2.gaps
+    );
+
+    let non_fallible = r#"
+def risky3(x: int) -> int:
+    try:
+        y = x
+    except ValueError:
+        y = -1
+    return y
+"#;
+    let (report3, _) = transpile_source(non_fallible, "nonfallible.py", None).unwrap();
+    assert!(
+        report3
+            .gaps
+            .iter()
+            .any(|g| g.category == Category::FunctionBody),
+        "non-fallible try expression must gap rather than guess: {:?}",
+        report3.gaps
     );
 }
