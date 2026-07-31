@@ -65,7 +65,7 @@ permissions: {}
 jobs:
   resolve:
     name: resolve target and branch
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, podman]
     timeout-minutes: 5
     permissions:
       contents: read
@@ -161,7 +161,7 @@ jobs:
   analyze:
     name: fetch and analyze
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, podman]
     timeout-minutes: 30
     # Read only. This job touches third-party source; it must never be able to
     # write to the repository, and it holds no secrets.
@@ -301,7 +301,7 @@ jobs:
   report:
     name: commit analysis to the corpus branch
     needs: [resolve, analyze]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, podman]
     timeout-minutes: 10
     # The only job with write access, and it never executes third-party code --
     # it consumes the previous job's output as inert data.
@@ -366,7 +366,7 @@ jobs:
     name: grok evaluation (judgement only)
     needs: [resolve, analyze]
     if: ${{ inputs.grok_eval }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, podman]
     timeout-minutes: 15
     permissions: {}
     steps:
