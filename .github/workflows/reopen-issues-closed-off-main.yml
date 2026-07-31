@@ -31,7 +31,7 @@ jobs:
   reopen:
     name: Reopen issues closed off-main
     # ubuntu-latest: pure API bookkeeping; must not depend on self-hosted fleet capacity.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, podman]
     steps:
       - uses: actions/checkout@v4
 
