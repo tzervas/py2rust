@@ -1,6 +1,6 @@
 # py2rust — Roadmap
 
-**Status:** Scaffolding / hygiene (2026-07-09)  
+**Status:** Scaffolding / hygiene (2026-07-09), Wave H complete.
 **Role:** Thin support repo for Python to Rust transpiler and code conversion assistant.  
 **Living with:** [README.md](../README.md) · [AGENTS.md](../AGENTS.md) · workspace [plan.md](../../plan.md)
 
@@ -8,7 +8,7 @@ Tero-ready (docs/tero-index) and hygiene (scripts/check.sh) added per plan.md pr
 
 ## Waves (minimal for scaffolding)
 
-### Wave H — Hygiene & Tero closure (this chore)
+### Wave H — Hygiene & Tero closure (Completed)
 - Add scripts/check.sh modeled on search-box/cabal (uv if present, ruff, pytest, tero index gen)
 - Minimal docs/ROADMAP.md (this) + AGENTS append
 - Land chore/tero-index-cabal-ready → dev (merge --no-ff), → main; propagate
