@@ -645,11 +645,7 @@ fn indent_block(block: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        + "\n"
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -867,8 +863,67 @@ fn lower_simple_expr_in(expr: &ast::Expr, env: &TypeEnv, expected: Option<&str>)
             }
             Some(format!("{func}({})", args.join(", ")))
         }
+        ast::Expr::ListComp(lc) => lower_list_comp(lc, env),
         _ => None,
     }
+}
+
+/// Shape gate shared by emit + walk: what Wave B #52 actually lowers.
+fn is_simple_list_comp_shape(lc: &ast::ExprListComp) -> bool {
+    if lc.generators.len() != 1 {
+        return false;
+    }
+    let g = &lc.generators[0];
+    if g.is_async {
+        return false;
+    }
+    let ast::Expr::Name(n) = &g.target else {
+        return false;
+    };
+    !matches!(rust_ident(n.id.as_str()).1, IdentFix::Renamed)
+}
+
+/// Simple list comprehensions only: one generator, `Name` target, no async.
+///
+/// `[elt for x in xs]` → `xs.into_iter().map(|x| elt).collect::<Vec<_>>()`
+/// `[x for x in xs if p]` → filter then map/collect.
+/// Nested generators, unpack targets, and set/dict/genexps stay unlowered.
+fn lower_list_comp(lc: &ast::ExprListComp, env: &TypeEnv) -> Option<String> {
+    if !is_simple_list_comp_shape(lc) {
+        return None;
+    }
+    let g = &lc.generators[0];
+    let target = match &g.target {
+        ast::Expr::Name(n) => n.id.to_string(),
+        _ => return None,
+    };
+    let (rs_t, _) = rust_ident(&target);
+    let iter = lower_simple_expr_in(&g.iter, env, None)?;
+    // Bind the loop var so names inside elt/ifs lower (type unknown — rustc decides).
+    let mut local = env.clone();
+    local.insert(target.clone(), "/* dyn */".into());
+
+    let mut chain = format!("{iter}.into_iter()");
+    if !g.ifs.is_empty() {
+        let mut conds = Vec::new();
+        for pred in &g.ifs {
+            conds.push(lower_simple_expr_in(pred, &local, Some("bool"))?);
+        }
+        let cond = if conds.len() == 1 {
+            conds[0].clone()
+        } else {
+            format!("({})", conds.join(" && "))
+        };
+        chain.push_str(&format!(".filter(|{rs_t}| {cond})"));
+    }
+    // Identity `[x for x in xs]` skips map.
+    let is_identity = matches!(lc.elt.as_ref(), ast::Expr::Name(n) if n.id.as_str() == target);
+    if !is_identity {
+        let elt = lower_simple_expr_in(lc.elt.as_ref(), &local, None)?;
+        chain.push_str(&format!(".map(|{rs_t}| {elt})"));
+    }
+    chain.push_str(".collect::<Vec<_>>()");
+    Some(chain)
 }
 
 /// Render a Python constant as Rust, honouring an expected type for numerics.
@@ -1168,8 +1223,18 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             }
         }
         ast::Expr::ListComp(lc) => {
-            out.push(comp_gap(fname, "list"));
+            // Only gap shapes we do *not* lower in `lower_list_comp`. Simple
+            // one-gen Name-target comps are real emission, not Comprehension debt.
+            if !is_simple_list_comp_shape(lc) {
+                out.push(comp_gap(fname, "list"));
+            }
             walk_expr(&lc.elt, fname, out);
+            for g in &lc.generators {
+                walk_expr(&g.iter, fname, out);
+                for pred in &g.ifs {
+                    walk_expr(pred, fname, out);
+                }
+            }
         }
         ast::Expr::SetComp(sc) => {
             out.push(comp_gap(fname, "set"));
