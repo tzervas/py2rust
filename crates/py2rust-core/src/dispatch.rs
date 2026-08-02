@@ -510,14 +510,14 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
     }
 }
 
+/// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
+/// to a single `Name` target, and never an AugAssign or Delete target.
+///
 /// Module-level `NAME = <literal>` → Rust `const` when the RHS is a known constant.
 ///
 /// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
 /// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
 /// const-legal at L3 (`String` is not a const type).
-
-/// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
-/// to a single `Name` target, and never an AugAssign or Delete target.
 fn module_const_eligible_names(body: &[ast::Stmt]) -> HashSet<String> {
     let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut mutated: HashSet<String> = HashSet::new();
