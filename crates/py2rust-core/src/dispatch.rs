@@ -515,7 +515,7 @@ fn expr_name(expr: &ast::Expr) -> Option<String> {
 /// Only a single `Name` target is supported; multi-target / unpack / non-literal RHS
 /// stay DynamicTyping gaps (caller). String literals lower to `&str` so the item is
 /// const-legal at L3 (`String` is not a const type).
-
+///
 /// Names eligible for module-level `const`: bound exactly once via Assign/AnnAssign
 /// to a single `Name` target, and never an AugAssign or Delete target.
 fn module_const_eligible_names(body: &[ast::Stmt]) -> HashSet<String> {
