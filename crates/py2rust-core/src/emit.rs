@@ -404,8 +404,8 @@ fn try_lower_body(
                     return None;
                 }
                 // Prefer type forced by RHS; fall back to existing env entry.
-                let want = forced_ty(&a.value, &local_env)
-                    .or_else(|| local_env.get(&name).cloned());
+                let want =
+                    forced_ty(&a.value, &local_env).or_else(|| local_env.get(&name).cloned());
                 let rhs = lower_simple_expr_in(&a.value, &local_env, want.as_deref())?;
                 // Loop rebind of an outer name → honest assignment (initial binding was `let mut`).
                 if rebind_forbidden.is_some_and(|e| e.contains_key(&name)) {
@@ -483,7 +483,14 @@ fn try_lower_body(
                 }
             }
             ast::Stmt::If(i) => {
-                let block = lower_if(i, &local_env, ret_ty, is_tail, ret_is_unit, rebind_forbidden)?;
+                let block = lower_if(
+                    i,
+                    &local_env,
+                    ret_ty,
+                    is_tail,
+                    ret_is_unit,
+                    rebind_forbidden,
+                )?;
                 lines.push(block);
             }
             ast::Stmt::While(w) => {
@@ -508,7 +515,10 @@ fn try_lower_body(
     if !ret_is_unit {
         let has_value_tail = body
             .last()
-            .map(|s| matches!(s, ast::Stmt::Return(r) if r.value.is_some()) || matches!(s, ast::Stmt::If(_)))
+            .map(|s| {
+                matches!(s, ast::Stmt::Return(r) if r.value.is_some())
+                    || matches!(s, ast::Stmt::If(_))
+            })
             .unwrap_or(false);
         if !has_value_tail {
             return None;
@@ -634,7 +644,7 @@ fn lower_for_iter(expr: &ast::Expr, env: &TypeEnv) -> Option<String> {
 }
 
 fn indent_block(block: &str) -> String {
-    block
+    let mut out = block
         .lines()
         .map(|l| {
             if l.is_empty() {
@@ -644,12 +654,11 @@ fn indent_block(block: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join("\n")
-        + if block.ends_with('\n') || block.is_empty() {
-            "\n"
-        } else {
-            "\n"
-        }
+        .join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
 }
 
 fn strip_outer_indent(block: &str) -> String {
@@ -1185,7 +1194,10 @@ fn walk_expr(expr: &ast::Expr, fname: &str, out: &mut Vec<GapReason>) {
             walk_expr(&ge.elt, fname, out);
         }
         ast::Expr::Await(a) => {
-            out.push(GapReason::new(Category::Async, format!("await in `{fname}`")));
+            out.push(GapReason::new(
+                Category::Async,
+                format!("await in `{fname}`"),
+            ));
             walk_expr(&a.value, fname, out);
         }
         ast::Expr::Yield(y) => {
