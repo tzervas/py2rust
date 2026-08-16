@@ -35,7 +35,6 @@ fn map_attribute(attr: &ast::ExprAttribute) -> Option<String> {
         // collections.abc containers map the same as builtins when bare (no params).
         ("collections", "abc") => None,
         _ => None,
-
     }
 }
 
@@ -284,11 +283,7 @@ pub fn is_erasable_import_module(module: &str) -> bool {
     // Modules needing external crates (json, re) stay Import-gapped with crate hints.
     matches!(
         module,
-        "__future__"
-            | "typing"
-            | "typing_extensions"
-            | "collections.abc"
-            | "pathlib" // Path maps as PathBuf by bare name; runtime pathlib APIs still gap at call
+        "__future__" | "typing" | "typing_extensions" | "collections.abc" | "pathlib" // Path maps as PathBuf by bare name; runtime pathlib APIs still gap at call
     )
 }
 
@@ -373,7 +368,10 @@ mod type_map_tests {
     fn scalars_and_containers() {
         assert_eq!(map_type_expr(&ann("int")).as_deref(), Some("i64"));
         assert_eq!(map_type_expr(&ann("str")).as_deref(), Some("String"));
-        assert_eq!(map_type_expr(&ann("list[int]")).as_deref(), Some("Vec<i64>"));
+        assert_eq!(
+            map_type_expr(&ann("list[int]")).as_deref(),
+            Some("Vec<i64>")
+        );
         assert_eq!(
             map_type_expr(&ann("dict[str, int]")).as_deref(),
             Some("std::collections::HashMap<String, i64>")
