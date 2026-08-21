@@ -8,11 +8,11 @@ Tero-ready (docs/tero-index) and hygiene (scripts/check.sh) added per plan.md pr
 
 ## Waves (minimal for scaffolding)
 
-### Wave H — Hygiene & Tero closure (this chore)
+### Wave H — Hygiene & Tero closure (Completed)
 - Add scripts/check.sh modeled on search-box/cabal (uv if present, ruff, pytest, tero index gen)
-- Minimal docs/ROADMAP.md (this) + AGENTS append
+- Minimal docs/ROADMAP.md + AGENTS append
 - Land chore/tero-index-cabal-ready → dev (merge --no-ff), → main; propagate
-- update-tero; verify checks
+- Workspace hygiene: Zero Clippy warnings (`cargo clippy --workspace --all-targets -- -D warnings`), formatted workspace (`cargo fmt`), clean PyTest/Ruff/MyPy passes.
 
 ### Wave P — Polish & Integration
 - cabal-devmelopner integration + tero for transpiler hints
