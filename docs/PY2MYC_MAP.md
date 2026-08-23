@@ -1,6 +1,6 @@
 # Python → Mycelium-native mapping
 
-**Status:** 0.x scaffolding (this PR)  
+**Status:** Stable Mapping Contract
 **Contract:** [`crates/py2rust-core/src/interface.rs`](../crates/py2rust-core/src/interface.rs)  
 **Table:** [`crates/py2rust-core/src/myc_map.rs`](../crates/py2rust-core/src/myc_map.rs)  
 **Gap bridge:** [`crates/py2rust-core/src/gap.rs`](../crates/py2rust-core/src/gap.rs)
