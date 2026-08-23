@@ -1,10 +1,10 @@
 # py2rust — Roadmap
 
-**Status:** Scaffolding / hygiene (2026-07-09)  
-**Role:** Thin support repo for Python to Rust transpiler and code conversion assistant.  
-**Living with:** [README.md](../README.md) · [AGENTS.md](../AGENTS.md) · workspace [plan.md](../../plan.md)
+**Status:** 0.2.0 Transpiler & Honest Gap Engine
+**Role:** Rust-first Python → Rust transpiler and code conversion assistant.
+**Living with:** [README.md](../README.md) · [AGENTS.md](../AGENTS.md)
 
-Tero-ready (docs/tero-index) and hygiene (scripts/check.sh) added per plan.md priority 1 (hygiene-thin-repos).
+Tero-ready (`docs/tero-index`), hygiene (`scripts/check.sh`), and strict Clippy/fmt quality gates enabled.
 
 ## Waves (minimal for scaffolding)
 
